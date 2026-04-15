@@ -45,7 +45,8 @@ class ModelAggregator:
         checkpoint_interval: int = 10,
         consensus_threshold: float = 0.5,
         consensus_loss_tolerance: float = 0.05,
-        convergence_config: Optional[ConvergenceConfig] = None
+        convergence_config: Optional[ConvergenceConfig] = None,
+        stale_round_tolerance: int = 2
     ):
         """
         Initialize the model aggregator.
@@ -62,6 +63,10 @@ class ModelAggregator:
             min_peers_before_aggregate: Minimum pending updates required before
                 aggregation proceeds (default: 1). If fewer updates are
                 available, aggregation is deferred to the next round.
+            stale_round_tolerance: Maximum allowed round difference for
+                incoming updates. Updates with
+                ``abs(round_number - current_round) > stale_round_tolerance``
+                are silently rejected (default: 2).
         """
         self.peer_id = peer_id
         self.domain = domain
@@ -86,6 +91,9 @@ class ModelAggregator:
         self.current_round = 0
         self.known_peers: Dict[str, PeerInfo] = {}
         self.pending_updates: List[ModelUpdate] = []
+        self._pending_lock = asyncio.Lock()
+        self._aggregating = False
+        self.stale_round_tolerance = stale_round_tolerance
         self._aggregation_event = asyncio.Event()
         self.metrics: Dict[str, float] = {} # Store latest training metrics
         self.metrics_history: List[Dict] = [] # History for plotting
@@ -265,8 +273,40 @@ class ModelAggregator:
             await self._handle_checkpoint_announce(message)
 
     async def _handle_model_update(self, message: ModelUpdateMessage):
-        """Handle an incoming model update."""
+        """Handle an incoming model update.
+
+        Rejects updates when the loop is not running (A4) and applies
+        round-gating so that stale or implausibly future updates never
+        enter ``pending_updates`` (A1 §2.2).
+        """
+        # A4: refuse appends once the loop has stopped
+        if not self.running:
+            logger.debug(
+                f"Dropping update from {message.sender_id}: loop not running"
+            )
+            return
+
         await self._execute_hooks("after_receive", message)
+
+        # Round-gate: reject updates too far from current round
+        round_diff = abs(message.round_number - self.current_round)
+        if round_diff > self.stale_round_tolerance:
+            logger.debug(
+                f"Rejecting stale/future update from {message.sender_id}: "
+                f"msg_round={message.round_number}, local_round={self.current_round}, "
+                f"tolerance={self.stale_round_tolerance}"
+            )
+            self._emit_event(
+                "model_rejected_stale",
+                {
+                    "node_id": self.peer_id,
+                    "peer_id": message.sender_id,
+                    "msg_round": message.round_number,
+                    "local_round": self.current_round,
+                    "tolerance": self.stale_round_tolerance,
+                },
+            )
+            return
 
         # Create ModelUpdate from message
         update = ModelUpdate(
@@ -278,7 +318,9 @@ class ModelAggregator:
             round_number=message.round_number
         )
 
-        self.pending_updates.append(update)
+        async with self._pending_lock:
+            self.pending_updates.append(update)
+
         self._emit_event(
             "model_received",
             {
@@ -506,68 +548,100 @@ class ModelAggregator:
             )
 
     async def _aggregate_models(self) -> Optional[AggregatedModel]:
-        """Aggregate pending model updates."""
-        if not self.pending_updates:
+        """Aggregate pending model updates.
+
+        Uses an async lock to atomically drain ``pending_updates`` into a
+        local batch so that updates arriving during the (potentially slow)
+        aggregation call are preserved for the next round instead of being
+        silently discarded (A1 §2.1 TOCTOU fix).
+
+        A re-entrancy guard (``_aggregating``) prevents overlapping
+        aggregation calls (A1 §2.6).
+        """
+        # Re-entrancy guard
+        if self._aggregating:
+            logger.debug("Aggregation already in progress, skipping")
             return None
 
-        if len(self.pending_updates) < self.min_peers_before_aggregate:
-            logger.debug(
-                f"Deferring aggregation: {len(self.pending_updates)} pending updates "
-                f"< min_peers_before_aggregate={self.min_peers_before_aggregate}"
+        # ── Drain under lock ────────────────────────────────────────
+        async with self._pending_lock:
+            if not self.pending_updates:
+                return None
+            if len(self.pending_updates) < self.min_peers_before_aggregate:
+                logger.debug(
+                    f"Deferring aggregation: {len(self.pending_updates)} pending "
+                    f"< min_peers_before_aggregate={self.min_peers_before_aggregate}"
+                )
+                self._aggregation_event.clear()
+                return None
+            # Drain into local batch; the shared list is now empty so new
+            # updates arriving during aggregation are safely appended.
+            batch = list(self.pending_updates)
+            self.pending_updates.clear()
+
+        # Belt-and-braces: filter the batch against current_round one more
+        # time, in case round incremented between append and drain.
+        batch = [
+            u for u in batch
+            if abs(u.round_number - self.current_round) <= self.stale_round_tolerance
+        ]
+        if not batch:
+            return None
+
+        self._aggregating = True
+        try:
+            await self._execute_hooks("before_aggregate", batch)
+
+            # Include own model in aggregation
+            if self._last_training_result and self._last_training_result.samples_trained > 0:
+                own_sample_count = self._last_training_result.samples_trained
+            else:
+                peer_counts = [u.sample_count for u in batch if u.sample_count > 0]
+                own_sample_count = (
+                    sum(peer_counts) // len(peer_counts)
+                    if peer_counts
+                    else self.training_config.batch_size
+                )
+
+            from quinkgl.models.base import PersonalizedModelWrapper as _PMW
+            if isinstance(self.model, _PMW):
+                own_weights = self.model.get_backbone_weights()
+            else:
+                own_weights = self.model.get_weights()
+
+            own_update = ModelUpdate(
+                peer_id=self.peer_id,
+                weights=own_weights,
+                sample_count=own_sample_count,
+                round_number=self.current_round,
             )
+
+            all_updates = [own_update] + batch
+            aggregated = await self.aggregator.aggregate(all_updates)
+
+            await self._execute_hooks("after_aggregate", aggregated)
+
+            # Update model with aggregated weights
+            from quinkgl.models.base import PersonalizedModelWrapper, APFLMixin
+
+            if isinstance(self.model, PersonalizedModelWrapper):
+                self.model.set_backbone_weights(aggregated.weights)
+            else:
+                self.model.set_weights(aggregated.weights)
+
+            # APFL adaptive mixing: blend local + global weights
+            if isinstance(self.model, PersonalizedModelWrapper) and isinstance(self.model, APFLMixin):
+                local_weights = self.model.get_head_weights()
+                global_weights = aggregated.weights
+                mixed = self.model.compute_personalized_weights(
+                    local_weights=local_weights,
+                    global_weights=global_weights,
+                )
+                self.model.set_backbone_weights(mixed)
+
             self._aggregation_event.clear()
-            return None
-
-        await self._execute_hooks("before_aggregate", self.pending_updates)
-
-        # Include own model in aggregation
-        # Use actual samples_trained from last training if available
-        if self._last_training_result and self._last_training_result.samples_trained > 0:
-            own_sample_count = self._last_training_result.samples_trained
-        else:
-            # Fallback to average of peer sample counts if own is unknown
-            peer_counts = [u.sample_count for u in self.pending_updates if u.sample_count > 0]
-            own_sample_count = sum(peer_counts) // len(peer_counts) if peer_counts else self.training_config.batch_size
-
-        from quinkgl.models.base import PersonalizedModelWrapper as _PMW
-        if isinstance(self.model, _PMW):
-            own_weights = self.model.get_backbone_weights()
-        else:
-            own_weights = self.model.get_weights()
-
-        own_update = ModelUpdate(
-            peer_id=self.peer_id,
-            weights=own_weights,
-            sample_count=own_sample_count,
-            round_number=self.current_round
-        )
-
-        all_updates = [own_update] + self.pending_updates
-        aggregated = await self.aggregator.aggregate(all_updates)
-
-        await self._execute_hooks("after_aggregate", aggregated)
-
-        # Update model with aggregated weights
-        from quinkgl.models.base import PersonalizedModelWrapper, APFLMixin
-
-        if isinstance(self.model, PersonalizedModelWrapper):
-            self.model.set_backbone_weights(aggregated.weights)
-        else:
-            self.model.set_weights(aggregated.weights)
-
-        # APFL adaptive mixing: blend local + global weights
-        if isinstance(self.model, PersonalizedModelWrapper) and isinstance(self.model, APFLMixin):
-            local_weights = self.model.get_head_weights()
-            global_weights = aggregated.weights
-            mixed = self.model.compute_personalized_weights(
-                local_weights=local_weights,
-                global_weights=global_weights,
-            )
-            self.model.set_backbone_weights(mixed)
-
-        # Clear pending updates and aggregation event
-        self.pending_updates.clear()
-        self._aggregation_event.clear()
+        finally:
+            self._aggregating = False
 
         logger.debug(
             f"Aggregated models from {len(aggregated.contributing_peers)} peers "
@@ -787,6 +861,8 @@ class ModelAggregator:
 
         finally:
             self.running = False
+            async with self._pending_lock:
+                self.pending_updates.clear()
             logger.info(f"Gossip learning loop stopped (completed {self.current_round} rounds)")
 
     def increment_round(self):

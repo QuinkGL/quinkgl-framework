@@ -239,6 +239,7 @@ async def test_aggregator_emits_training_send_receive_and_aggregation_events():
     )
     aggregator.event_emitter = emitter
     aggregator.current_round = 7
+    aggregator.running = True
 
     async def send_message_callback(peer_id, message):
         return None
