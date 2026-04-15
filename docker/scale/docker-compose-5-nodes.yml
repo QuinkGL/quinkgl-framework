@@ -1,0 +1,62 @@
+version: '3.8'
+services:
+  node_1:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_1 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 5 --node-index 0 --topology
+      cyclon --gossip-interval 5.0 --epochs 1 --max-rounds 5 --lr 0.001 --batch-size 16 --num-samples 1000
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8001:8001
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_2:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_2 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 5 --node-index 1 --topology
+      cyclon --gossip-interval 5.0 --epochs 1 --max-rounds 5 --lr 0.001 --batch-size 16 --num-samples 1000
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8002:8002
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_3:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_3 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 5 --node-index 2 --topology
+      cyclon --gossip-interval 5.0 --epochs 1 --max-rounds 5 --lr 0.001 --batch-size 16 --num-samples 1000
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8003:8003
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_4:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_4 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 5 --node-index 3 --topology
+      cyclon --gossip-interval 5.0 --epochs 1 --max-rounds 5 --lr 0.001 --batch-size 16 --num-samples 1000
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8004:8004
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_5:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_5 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 5 --node-index 4 --topology
+      cyclon --gossip-interval 5.0 --epochs 1 --max-rounds 5 --lr 0.001 --batch-size 16 --num-samples 1000
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8005:8005
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs

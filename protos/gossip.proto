@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package quinkgl;
+
+// Service for gossip-based federated learning
+service GossipService {
+  // Bidirectional streaming for continuous weight exchange
+  rpc GossipStream(stream WeightUpdate) returns (stream WeightUpdate);
+  
+  // Get peer information
+  rpc GetPeerInfo(Empty) returns (PeerInfo);
+}
+
+// Model weight update message
+message WeightUpdate {
+  string node_id = 1;           // Unique identifier of the sending node
+  int64 timestamp = 2;          // Unix timestamp in milliseconds
+  repeated Layer layers = 3;    // Model layers with weights
+  int32 round = 4;              // Training round number
+}
+
+// Single layer of model weights
+message Layer {
+  string name = 1;              // Layer name/identifier
+  repeated float weights = 2;   // Flattened weight array
+  repeated int32 shape = 3;     // Original shape for reconstruction
+}
+
+// Peer information
+message PeerInfo {
+  string node_id = 1;           // Unique node identifier
+  string address = 2;           // IP:port address
+  int32 num_peers = 3;          // Number of connected peers
+  int64 uptime = 4;             // Uptime in seconds
+}
+
+// Empty message for requests with no parameters
+message Empty {}

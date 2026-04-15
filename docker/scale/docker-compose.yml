@@ -1,0 +1,302 @@
+version: '3.8'
+services:
+  node_1:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_1 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 0 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8001:8001
+    volumes:
+    - ./data:/app/data
+  node_2:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_2 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 1 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8002:8002
+    volumes:
+    - ./data:/app/data
+  node_3:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_3 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 2 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8003:8003
+    volumes:
+    - ./data:/app/data
+  node_4:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_4 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 3 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8004:8004
+    volumes:
+    - ./data:/app/data
+  node_5:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_5 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 4 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8005:8005
+    volumes:
+    - ./data:/app/data
+  node_6:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_6 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 5 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8006:8006
+    volumes:
+    - ./data:/app/data
+  node_7:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_7 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 6 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8007:8007
+    volumes:
+    - ./data:/app/data
+  node_8:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_8 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 7 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8008:8008
+    volumes:
+    - ./data:/app/data
+  node_9:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_9 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 8 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8009:8009
+    volumes:
+    - ./data:/app/data
+  node_10:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_10 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 9 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8010:8010
+    volumes:
+    - ./data:/app/data
+  node_11:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_11 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 10 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8011:8011
+    volumes:
+    - ./data:/app/data
+  node_12:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_12 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 11 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8012:8012
+    volumes:
+    - ./data:/app/data
+  node_13:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_13 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 12 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8013:8013
+    volumes:
+    - ./data:/app/data
+  node_14:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_14 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 13 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8014:8014
+    volumes:
+    - ./data:/app/data
+  node_15:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_15 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 14 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8015:8015
+    volumes:
+    - ./data:/app/data
+  node_16:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_16 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 15 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8016:8016
+    volumes:
+    - ./data:/app/data
+  node_17:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_17 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 16 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8017:8017
+    volumes:
+    - ./data:/app/data
+  node_18:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_18 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 17 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8018:8018
+    volumes:
+    - ./data:/app/data
+  node_19:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_19 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 18 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8019:8019
+    volumes:
+    - ./data:/app/data
+  node_20:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_20 --domain scale-test
+      --dataset cifar10 --split-type iid --total-nodes 20 --node-index 19 --topology
+      cyclon --gossip-interval 5.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8020:8020
+    volumes:
+    - ./data:/app/data

@@ -1,0 +1,42 @@
+# QuinkGL Requirements
+# Python 3.9+ required
+#
+# This file is auto-generated from pyproject.toml dependencies.
+# For development, use: pip install -e ".[dev]"
+# For all extras: pip install -e ".[all]"
+
+# Core numerical computing
+numpy>=2.4.1
+
+# Deep learning
+torch>=2.10.0
+torchvision>=0.25.0
+
+# Data handling
+scikit-learn>=1.8.0
+pandas>=3.0.0
+
+# P2P networking
+pyipv8>=3.1.0
+
+# gRPC for communication
+grpcio>=1.76.0
+grpcio-tools>=1.76.0
+protobuf>=6.33.4
+
+# Safe serialization (replaces pickle for security)
+msgpack>=1.1.2
+
+
+
+# Installation Notes:
+# ==================
+#
+# Standard installation:
+#   pip install -r requirements.txt
+#
+# Development installation:
+#   pip install -e ".[dev]"
+#
+# With all optional features:
+#   pip install -e ".[all]"

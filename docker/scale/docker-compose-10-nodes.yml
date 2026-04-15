@@ -1,0 +1,122 @@
+version: '3.8'
+services:
+  node_1:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_1 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 0 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8001:8001
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_2:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_2 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 1 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8002:8002
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_3:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_3 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 2 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8003:8003
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_4:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_4 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 3 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8004:8004
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_5:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_5 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 4 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8005:8005
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_6:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_6 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 5 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8006:8006
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_7:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_7 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 6 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8007:8007
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_8:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_8 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 7 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8008:8008
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_9:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_9 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 8 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8009:8009
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+  node_10:
+    image: quinkgl-node
+    command: python3 scripts/run_gossip_node.py --node-id node_10 --domain cifar10-vision
+      --dataset cifar10 --split-type iid --total-nodes 10 --node-index 9 --topology
+      cyclon --gossip-interval 5.0 --epochs 3 --max-rounds 20 --lr 0.001 --batch-size 32
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8010:8010
+    volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs

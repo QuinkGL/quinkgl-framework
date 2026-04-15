@@ -1,0 +1,197 @@
+version: '3.8'
+
+# ==============================================================================
+# IMPORTANT: TUNNEL_SERVER must be set before running docker-compose
+# ==============================================================================
+#
+# The TUNNEL_SERVER environment variable is REQUIRED. Without it, the
+# containers will fail to start with a clear error message.
+#
+# Setup options:
+#
+#   Option 1: Create .env in project root with:
+#     TUNNEL_SERVER=your-server:port
+#
+#   Option 2: Export before running:
+#     export TUNNEL_SERVER=your-server:port
+#     docker-compose up
+#
+#   Option 3: Pass directly:
+#     TUNNEL_SERVER=your-server:port docker-compose up
+#
+# Format: host:port (e.g., localhost:50051 or your-server.com:50051)
+# ==============================================================================
+
+services:
+
+  # Peer 1
+  peer1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer1
+    environment:
+      - NODE_ID=peer1
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer1 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+
+  # Peer 2
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer2
+    environment:
+      - NODE_ID=peer2
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer2 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 3
+  peer3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer3
+    environment:
+      - NODE_ID=peer3
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer3 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 4
+  peer4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer4
+    environment:
+      - NODE_ID=peer4
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer4 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 5
+  peer5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer5
+    environment:
+      - NODE_ID=peer5
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer5 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 6
+  peer6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer6
+    environment:
+      - NODE_ID=peer6
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer6 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 7
+  peer7:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer7
+    environment:
+      - NODE_ID=peer7
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer7 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 8
+  peer8:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer8
+    environment:
+      - NODE_ID=peer8
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer8 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 9
+  peer9:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer9
+    environment:
+      - NODE_ID=peer9
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer9 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+  # Peer 10
+  peer10:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: quinkgl-peer10
+    environment:
+      - NODE_ID=peer10
+      - TUNNEL_SERVER=${TUNNEL_SERVER:?TUNNEL_SERVER environment variable is required but not set. Set it in .env file or export TUNNEL_SERVER=host:port}
+    command: python3 chat.py --node-id peer10 --tunnel ${TUNNEL_SERVER:?TUNNEL_SERVER not set}
+    stdin_open: true
+    tty: true
+    networks:
+      - quinkgl-network
+    depends_on:
+      - peer1
+
+networks:
+  quinkgl-network:
+    driver: bridge

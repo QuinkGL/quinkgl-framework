@@ -1,0 +1,302 @@
+version: '3.8'
+services:
+  node_1:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_1 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 0 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8001:8001
+  node_2:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_2 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 1 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8002:8002
+  node_3:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_3 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 2 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8003:8003
+  node_4:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_4 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 3 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8004:8004
+  node_5:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_5 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 4 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8005:8005
+  node_6:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_6 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 5 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8006:8006
+  node_7:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_7 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 6 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8007:8007
+  node_8:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_8 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 7 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8008:8008
+  node_9:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_9 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 8 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8009:8009
+  node_10:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_10 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 9 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8010:8010
+  node_11:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_11 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 10 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8011:8011
+  node_12:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_12 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 11 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8012:8012
+  node_13:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_13 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 12 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8013:8013
+  node_14:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_14 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 13 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8014:8014
+  node_15:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_15 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 14 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8015:8015
+  node_16:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_16 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 15 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8016:8016
+  node_17:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_17 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 16 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8017:8017
+  node_18:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_18 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 17 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8018:8018
+  node_19:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_19 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 18 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8019:8019
+  node_20:
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    command: python3 scripts/run_gossip_node.py --node-id node_20 --domain scale-test
+      --dataset breast_cancer --split-type iid --total-nodes 20 --node-index 19 --topology
+      cyclon --gossip-interval 2.0 --epochs 1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      PYTHONUNBUFFERED: '1'
+    ports:
+    - 8020:8020

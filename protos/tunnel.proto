@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package quinkgl.tunnel;
+
+// Tunnel service for NAT traversal via reverse tunnel
+service TunnelService {
+  // Bidirectional streaming for tunnel registration and message relay
+  rpc RegisterTunnel(stream TunnelMessage) returns (stream TunnelMessage);
+}
+
+// Message types for tunnel communication
+enum MessageType {
+  REGISTER = 0;           // Client registration
+  HEARTBEAT = 1;          // Keep-alive
+  TEXT_MESSAGE = 2;       // Chat text message
+  PEER_LIST = 3;          // List of connected peers
+  ERROR = 4;              // Error message
+  SDP_OFFER = 5;          // ICE SDP offer (P2P signaling)
+  SDP_ANSWER = 6;         // ICE SDP answer (P2P signaling)
+  ICE_CANDIDATE = 7;      // ICE candidate (P2P signaling)
+}
+
+// Tunnel message wrapper
+message TunnelMessage {
+  string node_id = 1;     // Sender's node ID
+  string target_id = 2;   // Target node ID (empty for broadcast)
+  MessageType type = 3;   // Message type
+  bytes payload = 4;      // Serialized payload (e.g., WeightUpdate)
+  int64 timestamp = 5;    // Unix timestamp in milliseconds
+}
+
+// Registration payload
+message RegisterPayload {
+  string node_id = 1;
+  string version = 2;
+}
+
+// Heartbeat payload
+message HeartbeatPayload {
+  string node_id = 1;
+  int64 timestamp = 2;
+}
+
+// Chat message payload
+message ChatMessage {
+  string sender_id = 1;
+  string text = 2;
+  int64 timestamp = 3;
+}
+
+// Peer list payload
+message PeerListPayload {
+  repeated string peer_ids = 1;
+}
+
+// Error payload
+message ErrorPayload {
+  string code = 1;
+  string message = 2;
+}
+
+// ICE Candidate (P2P signaling)
+message ICECandidatePayload {
+  string foundation = 1;
+  int32 component = 2;
+  string protocol = 3;      // "udp" or "tcp"
+  int32 priority = 4;
+  string ip = 5;
+  int32 port = 6;
+  string type = 7;          // "host", "srflx", "relay"
+  string related_address = 8;
+  int32 related_port = 9;
+}
+
+// SDP Offer (P2P signaling)
+message SDPOfferPayload {
+  string from_id = 1;
+  string to_id = 2;
+  repeated ICECandidatePayload candidates = 3;
+  string session_id = 4;
+  int64 timestamp = 5;
+}
+
+// SDP Answer (P2P signaling)
+message SDPAnswerPayload {
+  string from_id = 1;
+  string to_id = 2;
+  repeated ICECandidatePayload candidates = 3;
+  string session_id = 4;
+  int64 timestamp = 5;
+}
+

@@ -1,0 +1,22 @@
+include README.md
+include LICENSE
+include requirements.txt
+
+# Source files (correct path with src/)
+recursive-include src/quinkgl *.py
+recursive-include src/quinkgl *.json
+recursive-include src/quinkgl *.txt
+
+# Data files
+recursive-exclude src/quinkgl/data *
+recursive-include src/quinkgl/data *.pkl
+recursive-include src/quinkgl/data *.npz
+
+# Documentation
+recursive-include docs *.md *.rst
+
+# Exclude cache and compiled files
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .git*
+global-exclude *.so
