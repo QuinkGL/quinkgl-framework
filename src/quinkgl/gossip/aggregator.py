@@ -529,9 +529,15 @@ class ModelAggregator:
             peer_counts = [u.sample_count for u in self.pending_updates if u.sample_count > 0]
             own_sample_count = sum(peer_counts) // len(peer_counts) if peer_counts else self.training_config.batch_size
 
+        from quinkgl.models.base import PersonalizedModelWrapper as _PMW
+        if isinstance(self.model, _PMW):
+            own_weights = self.model.get_backbone_weights()
+        else:
+            own_weights = self.model.get_weights()
+
         own_update = ModelUpdate(
             peer_id=self.peer_id,
-            weights=self.model.get_weights(),
+            weights=own_weights,
             sample_count=own_sample_count,
             round_number=self.current_round
         )
