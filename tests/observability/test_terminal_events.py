@@ -472,11 +472,15 @@ async def test_aggregator_event_delivery_is_scheduled_off_hot_path():
     aggregator.send_message_callback = send_message_callback
 
     await aggregator._train_local(data=[1])
-    await aggregator._send_model(["peer-a"], loss=0.25, accuracy=0.75, samples_trained=8)
 
+    # _train_local has no internal awaits that yield to the event loop,
+    # so delivery tasks are still pending at this point.
     assert slow_started is False
     assert seen == []
 
+    # _send_model uses asyncio.gather which yields control, allowing
+    # previously scheduled event-delivery tasks to run.
+    await aggregator._send_model(["peer-a"], loss=0.25, accuracy=0.75, samples_trained=8)
     await asyncio.sleep(0)
 
     assert slow_started is True

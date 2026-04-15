@@ -95,6 +95,9 @@ class ModelAggregator:
         self._aggregating = False
         self.stale_round_tolerance = stale_round_tolerance
         self._aggregation_event = asyncio.Event()
+        self._background_tasks: set[asyncio.Task] = set()
+        self._MAX_PENDING_EVENTS = 1024
+        self._event_drop_warned = False
         self.metrics: Dict[str, float] = {} # Store latest training metrics
         self.metrics_history: List[Dict] = [] # History for plotting
         self.comm_log: List[Dict] = [] # Log of outgoing messages
@@ -126,8 +129,23 @@ class ModelAggregator:
             "on_aggregation_complete": [],  # Called with AggregatedModel
         }
 
+    def _spawn_task(self, coro) -> Optional[asyncio.Task]:
+        """Create a tracked background task that auto-removes on completion."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        task = loop.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
     def _emit_event(self, event_type: str, payload: Dict[str, Any]) -> None:
-        """Schedule runtime observability delivery off the hot path."""
+        """Schedule runtime observability delivery off the hot path.
+
+        Caps pending event tasks at ``_MAX_PENDING_EVENTS`` to prevent
+        unbounded growth when subscribers are slow (A3 §2.4).
+        """
         if self.event_emitter:
             try:
                 loop = asyncio.get_running_loop()
@@ -135,7 +153,24 @@ class ModelAggregator:
                 self.event_emitter.emit(event_type, payload)
                 return
 
-            loop.create_task(self._deliver_event(event_type, payload))
+            # Count pending event-delivery tasks
+            event_tasks = sum(
+                1 for t in self._background_tasks
+                if not t.done() and t.get_name().startswith("evt:")
+            )
+            if event_tasks >= self._MAX_PENDING_EVENTS:
+                if not self._event_drop_warned:
+                    logger.warning(
+                        f"Event backlog reached {self._MAX_PENDING_EVENTS}, "
+                        f"dropping events until subscribers catch up"
+                    )
+                    self._event_drop_warned = True
+                return
+            self._event_drop_warned = False
+
+            task = self._spawn_task(self._deliver_event(event_type, payload))
+            if task is not None:
+                task.set_name(f"evt:{event_type}")
 
     async def _deliver_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         """Deliver one observability event on the event loop."""
@@ -235,7 +270,7 @@ class ModelAggregator:
                 except Exception as e:
                     logger.error(f"Error notifying topology about new peer {peer_info.peer_id}: {e}")
 
-            asyncio.create_task(_notify_topology())
+            self._spawn_task(_notify_topology())
 
     async def remove_peer(self, peer_id: str):
         """Remove a disconnected peer."""
@@ -477,7 +512,13 @@ class ModelAggregator:
         return loss, acc, samples
 
     async def _send_model(self, target_peers: List[str], loss: float = None, accuracy: float = None, samples_trained: int = None) -> None:
-        """Send current model to target peers."""
+        """Send current model to target peers concurrently.
+
+        Each peer send is wrapped in its own ``try/except`` so that a
+        single flaky peer cannot break the round or bump
+        ``consecutive_errors`` (A2 §2.5).  All targets are dispatched
+        via ``asyncio.gather`` for parallelism.
+        """
         from quinkgl.models.base import PersonalizedModelWrapper
 
         if isinstance(self.model, PersonalizedModelWrapper):
@@ -487,7 +528,6 @@ class ModelAggregator:
 
         await self._execute_hooks("before_send", weights)
 
-        # Use actual samples_trained if available, otherwise fallback to batch_size
         sample_count = samples_trained if samples_trained is not None else self.training_config.batch_size
 
         model_message = ModelUpdateMessage.create(
@@ -512,24 +552,52 @@ class ModelAggregator:
             },
         )
 
+        if not self.send_message_callback:
+            logger.debug("send_message_callback is None, skipping send")
+            return
+
         sent_peers: List[str] = []
-        for peer_id in target_peers:
-            if self.send_message_callback:
+        failed_peers: List[str] = []
+
+        async def _send_to_peer(peer_id: str):
+            try:
                 await self.send_message_callback(peer_id, model_message)
                 sent_peers.append(peer_id)
                 logger.debug(f"Sent model update to {peer_id}")
-                
-                # Log communication
                 self.comm_log.append({
                     "timestamp": datetime.now().isoformat(),
                     "target": peer_id,
-                    "round": self.current_round
+                    "round": self.current_round,
                 })
-                # Keep log size manageable
+                if len(self.comm_log) > 50:
+                    self.comm_log.pop(0)
+            except Exception as e:
+                failed_peers.append(peer_id)
+                logger.warning(
+                    f"Failed to send model to {peer_id}: "
+                    f"{e.__class__.__name__}: {e}"
+                )
+                self.comm_log.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "target": peer_id,
+                    "round": self.current_round,
+                    "error": str(e),
+                })
                 if len(self.comm_log) > 50:
                     self.comm_log.pop(0)
 
-        # MCP hook: model sent (calculate approximate size)
+        await asyncio.gather(*(_send_to_peer(pid) for pid in target_peers))
+
+        if failed_peers:
+            self._emit_event(
+                "model_send_failed",
+                {
+                    "node_id": self.peer_id,
+                    "round": self.current_round,
+                    "failed_peers": failed_peers,
+                },
+            )
+
         if sent_peers:
             import sys
             model_size = sys.getsizeof(weights) if weights else 0
@@ -863,12 +931,22 @@ class ModelAggregator:
             self.running = False
             async with self._pending_lock:
                 self.pending_updates.clear()
+            await self._cancel_background_tasks()
             logger.info(f"Gossip learning loop stopped (completed {self.current_round} rounds)")
 
     def increment_round(self):
         """Manually increment the current round number."""
         self.current_round += 1
         logger.debug(f"Round incremented to {self.current_round}")
+
+    async def _cancel_background_tasks(self):
+        """Cancel and await all tracked background tasks."""
+        tasks = list(self._background_tasks)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     def stop(self):
         """Stop the gossip learning loop."""
