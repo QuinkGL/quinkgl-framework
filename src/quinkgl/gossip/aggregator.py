@@ -46,7 +46,9 @@ class ModelAggregator:
         consensus_threshold: float = 0.5,
         consensus_loss_tolerance: float = 0.05,
         convergence_config: Optional[ConvergenceConfig] = None,
-        stale_round_tolerance: int = 2
+        stale_round_tolerance: int = 2,
+        min_peers_for_consensus: int = 3,
+        max_round_ahead: int = 50
     ):
         """
         Initialize the model aggregator.
@@ -67,6 +69,10 @@ class ModelAggregator:
                 incoming updates. Updates with
                 ``abs(round_number - current_round) > stale_round_tolerance``
                 are silently rejected (default: 2).
+            min_peers_for_consensus: Minimum number of peers required
+                before consensus can be declared (default: 3).
+            max_round_ahead: Maximum allowed round number offset for
+                checkpoint recording (default: 50).
         """
         self.peer_id = peer_id
         self.domain = domain
@@ -83,6 +89,8 @@ class ModelAggregator:
             checkpoint_interval=checkpoint_interval,
             consensus_threshold=consensus_threshold,
             loss_tolerance=consensus_loss_tolerance,
+            min_peers_for_consensus=min_peers_for_consensus,
+            max_round_ahead=max_round_ahead,
         )
         self.convergence_monitor = ConvergenceMonitor(config=convergence_config)
 
