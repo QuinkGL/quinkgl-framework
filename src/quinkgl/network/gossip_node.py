@@ -400,6 +400,35 @@ class GossipNode:
 
         self.community.on_model_update_callback = on_model_update
 
+        # B2: Wire checkpoint broadcast and receive
+        async def on_checkpoint_received(
+            sender_id: str, round_number: int,
+            loss: float, accuracy: float, model_version: str
+        ):
+            from quinkgl.gossip.protocol import CheckpointAnnounceMessage
+            msg = CheckpointAnnounceMessage.create(
+                sender_id=sender_id,
+                round_number=round_number,
+                loss=loss,
+                accuracy=accuracy,
+                model_version=model_version,
+            )
+            await self.gl_node._handle_network_message(msg)
+            logger.debug(f"Processed checkpoint from {sender_id} (round {round_number})")
+
+        self.community.on_checkpoint_callback = on_checkpoint_received
+
+        async def broadcast_checkpoint_via_ipv8(checkpoint_msg):
+            self.community.broadcast_checkpoint(
+                sender_id=checkpoint_msg.sender_id,
+                round_number=checkpoint_msg.round_number,
+                loss=checkpoint_msg.loss,
+                accuracy=checkpoint_msg.accuracy,
+                model_version=checkpoint_msg.model_version,
+            )
+
+        self.gl_node.aggregator.broadcast_callback = broadcast_checkpoint_via_ipv8
+
         # When peer discovered
         async def on_peer_discovered(peer_info):
             from quinkgl.topology.base import PeerInfo as FrameworkPeerInfo
@@ -490,27 +519,107 @@ class GossipNode:
         if not self.tunnel_client:
             return
 
+        # B1: concrete handler for MODEL_UPDATE via tunnel
+        async def _on_tunnel_model_update(data: dict):
+            """Decode, validate, and dispatch a tunnel MODEL_UPDATE payload.
+
+            Mirrors the IPv8 ``on_model_update`` path so updates arriving
+            via tunnel are treated identically by the aggregation layer.
+            """
+            from quinkgl.network.model_serializer import deserialize_model
+            from quinkgl.gossip.protocol import ModelUpdateMessage
+            from quinkgl.network.gossip_community import MAX_INCOMING_MESSAGE_SIZE
+
+            emitter = self.gl_node.aggregator.event_emitter
+
+            # ── Required-field validation ──────────────────────────
+            required = ("sender_id", "round_number", "weights")
+            missing = [f for f in required if f not in data]
+            if missing:
+                logger.warning(f"Tunnel MODEL_UPDATE missing fields: {missing}")
+                if emitter:
+                    emitter.emit("tunnel_payload_dropped", {
+                        "node_id": self.node_id,
+                        "reason": f"missing fields: {missing}",
+                    })
+                return
+
+            # ── Domain / schema compatibility ─────────────────────
+            msg_domain = data.get("domain")
+            msg_schema = data.get("data_schema_hash")
+            if msg_domain != self.domain or msg_schema != self.data_schema_hash:
+                logger.debug(
+                    f"Tunnel update rejected: domain/schema mismatch "
+                    f"(got {msg_domain}/{msg_schema}, "
+                    f"expected {self.domain}/{self.data_schema_hash})"
+                )
+                if emitter:
+                    emitter.emit("tunnel_payload_dropped", {
+                        "node_id": self.node_id,
+                        "peer_id": data.get("sender_id"),
+                        "reason": "domain/schema mismatch",
+                    })
+                return
+
+            # ── Size bound on hex-decoded weights ─────────────────
+            weights_hex = data["weights"]
+            if len(weights_hex) // 2 > MAX_INCOMING_MESSAGE_SIZE:
+                logger.warning(
+                    f"Tunnel update rejected: weights too large "
+                    f"({len(weights_hex) // 2} bytes)"
+                )
+                if emitter:
+                    emitter.emit("tunnel_payload_dropped", {
+                        "node_id": self.node_id,
+                        "peer_id": data.get("sender_id"),
+                        "reason": "oversized weights",
+                    })
+                return
+
+            # ── Deserialize weights ───────────────────────────────
+            try:
+                weights_bytes = bytes.fromhex(weights_hex)
+                weights = deserialize_model(weights_bytes)
+            except Exception as e:
+                logger.warning(f"Tunnel model deserialization failed: {e}")
+                if emitter:
+                    emitter.emit("tunnel_payload_dropped", {
+                        "node_id": self.node_id,
+                        "peer_id": data.get("sender_id"),
+                        "reason": f"deserialization error: {e}",
+                    })
+                return
+
+            # ── Dispatch to aggregation layer ─────────────────────
+            message = ModelUpdateMessage.create(
+                sender_id=data["sender_id"],
+                weights=weights,
+                sample_count=data.get("sample_count", 0),
+                loss=data.get("loss", 0.0),
+                accuracy=data.get("accuracy", 0.0),
+                round_number=data["round_number"],
+            )
+            await self.gl_node._handle_network_message(message)
+            logger.debug(f"Processed tunnel model update from {data['sender_id']}")
+
+        self._on_tunnel_model_update = _on_tunnel_model_update
+
         # Handle incoming chat messages (may contain model updates)
         async def on_tunnel_message(msg):
-            # Parse message - could be model update or peer discovery
             try:
                 import json
 
                 data = json.loads(msg.text)
 
                 if data.get("type") == "MODEL_UPDATE":
-                    # Handle model update via tunnel
-                    if self._on_tunnel_model_update:
-                        await self._on_tunnel_model_update(data)
+                    await self._on_tunnel_model_update(data)
                 elif data.get("type") == "PEER_ANNOUNCE":
-                    # Peer discovery announcement
                     peer_info = data.get("peer_info", {})
                     self._tunnel_peers[peer_info.get("node_id")] = peer_info
 
                     if self._on_tunnel_peer_discovered:
                         await self._on_tunnel_peer_discovered(peer_info)
 
-                    # Add to aggregator
                     from quinkgl.topology.base import PeerInfo as FrameworkPeerInfo
 
                     framework_peer_info = FrameworkPeerInfo(
@@ -524,8 +633,9 @@ class GossipNode:
                     logger.debug(f"Added tunnel peer {peer_info.get('node_id')} to aggregator")
 
             except json.JSONDecodeError:
-                # Regular chat message, ignore
                 pass
+            except Exception as e:
+                logger.warning(f"Error handling tunnel message: {e}")
 
         self.tunnel_client.on_chat_message = on_tunnel_message
 

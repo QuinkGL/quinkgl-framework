@@ -36,6 +36,20 @@ CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
 # Timeout for incomplete transfers (300 seconds - increased for Colab/slow networks)
 CHUNK_TRANSFER_TIMEOUT = 300
 
+# B4: Chunk-buffer memory caps to prevent DoS
+MAX_CONCURRENT_TRANSFERS_PER_PEER = 3
+MAX_TOTAL_TRANSFERS = 50
+MAX_BUFFERED_BYTES_PER_PEER = 200 * 1024 * 1024  # 200 MB
+MAX_CHUNKS_PER_TRANSFER = 300_000  # ~300 MB at 1 KB/chunk
+
+# B5: NACK rate-limiting
+NACK_MAX_RESENDS_PER_TRANSFER = 3
+NACK_BUCKET_INTERVAL = 10.0  # seconds — refill one token per interval
+NACK_BUCKET_MAX_TOKENS = 5   # max burst per peer
+
+# B6: Early NACK gap detection
+EARLY_NACK_AGE_THRESHOLD = 5.0  # seconds since buffer creation before probing
+
 
 def generate_community_id(domain: str, data_schema_hash: str) -> bytes:
     """
@@ -199,6 +213,47 @@ class PrototypeExchangePayload(Payload):
     @classmethod
     def from_unpack_list(cls, *args):
         return cls(args[0].decode('utf-8'), args[1].decode('utf-8'))
+
+
+class CheckpointPayload(Payload):
+    """
+    Payload for checkpoint announcements (B2).
+
+    Mirrors ``CheckpointAnnounceMessage`` fields for wire transmission.
+    Consensus is IPv8-only; tunnel fallback does not broadcast checkpoints
+    (documented trade-off: tunnel mode is a best-effort relay and checkpoint
+    consensus assumes a fully-connected overlay which tunnel does not provide).
+    """
+    msg_id = 9
+    format_list = ['varlenH', 'I', 'd', 'd', 'varlenH']
+
+    def __init__(self, sender_id: str, round_number: int, loss: float,
+                 accuracy: float, model_version: str = "1.0.0"):
+        super().__init__()
+        self.sender_id = sender_id
+        self.round_number = round_number
+        self.loss = loss
+        self.accuracy = accuracy
+        self.model_version = model_version
+
+    def to_pack_list(self):
+        return [
+            ('varlenH', self.sender_id.encode('utf-8')),
+            ('I', self.round_number),
+            ('d', self.loss),
+            ('d', self.accuracy),
+            ('varlenH', self.model_version.encode('utf-8')),
+        ]
+
+    @classmethod
+    def from_unpack_list(cls, *args):
+        return cls(
+            args[0].decode('utf-8'),  # sender_id
+            args[1],                   # round_number
+            args[2],                   # loss
+            args[3],                   # accuracy
+            args[4].decode('utf-8'),  # model_version
+        )
 
 
 class ModelChunkPayload(Payload):
@@ -497,11 +552,18 @@ class GossipLearningCommunity(Community):
         self._heartbeat_sequence = 0
 
         # Chunk buffer for reassembling large model transfers
-        self._chunk_buffers: Dict[str, ChunkBuffer] = {}  # transfer_id -> ChunkBuffer
+        # B3: keyed by (peer.mid, transfer_id) to prevent hijack
+        self._chunk_buffers: Dict[tuple, ChunkBuffer] = {}  # (peer_mid, transfer_id) -> ChunkBuffer
         
         # Cache for outgoing transfers to support retry (resending chunks)
-        # transfer_id -> { 'weights_bytes': bytes, 'timestamp': float }
+        # transfer_id -> { 'weights_bytes': bytes, 'timestamp': float, ... }
         self._outgoing_transfers: Dict[str, Dict] = {}
+
+        # B5: NACK rate-limiting state
+        # transfer_id -> resend count
+        self._nack_resend_counts: Dict[str, int] = {}
+        # peer_mid -> { 'tokens': float, 'last_refill': float }
+        self._nack_buckets: Dict[str, Dict] = {}
 
         # Message handlers
         self.add_message_handler(DiscoveryAnnouncePayload, self.on_discovery_announce)
@@ -512,6 +574,7 @@ class GossipLearningCommunity(Community):
         self.add_message_handler(ShufflePayload, self.on_shuffle_request)
         self.add_message_handler(ShuffleResponsePayload, self.on_shuffle_response)
         self.add_message_handler(PrototypeExchangePayload, self.on_prototype_exchange)
+        self.add_message_handler(CheckpointPayload, self.on_checkpoint)
 
         # DEBUG: Check if handlers are registered
         logger.debug(f"Registered handlers: {len(self.decode_map)} handlers")
@@ -522,6 +585,7 @@ class GossipLearningCommunity(Community):
         self.on_peer_left_callback: Optional[Callable] = None
         self.on_shuffle_callback: Optional[Callable] = None
         self.on_prototype_callback: Optional[Callable] = None
+        self.on_checkpoint_callback: Optional[Callable] = None
 
         # Local data fingerprint for affinity-based peer selection
         self.local_fingerprint: Optional[Any] = None
@@ -573,6 +637,14 @@ class GossipLearningCommunity(Community):
             self._cleanup_outgoing_cache,
             interval=60.0,
             delay=45.0
+        )
+
+        # B6: Early NACK for incomplete buffers with gaps
+        self.register_task(
+            "nack_incomplete_buffers",
+            self._nack_incomplete_buffers,
+            interval=5.0,
+            delay=10.0
         )
 
         logger.debug("GossipLearningCommunity tasks registered")
@@ -629,14 +701,14 @@ class GossipLearningCommunity(Community):
         """Remove incomplete chunk transfers that have timed out."""
         stale_transfers = []
         
-        for transfer_id, buffer in self._chunk_buffers.items():
+        for buf_key, buffer in self._chunk_buffers.items():
             if buffer.is_expired():
-                stale_transfers.append(transfer_id)
+                stale_transfers.append(buf_key)
         
-        for transfer_id in stale_transfers:
-            buffer = self._chunk_buffers.pop(transfer_id)
+        for buf_key in stale_transfers:
+            buffer = self._chunk_buffers.pop(buf_key)
             logger.warning(
-                f"Removed stale transfer {transfer_id[:8]}... from {buffer.sender_id}: "
+                f"Removed stale transfer {buffer.transfer_id[:8]}... from {buffer.sender_id}: "
                 f"only {len(buffer.chunks)}/{buffer.total_chunks} chunks received"
             )
 
@@ -647,6 +719,60 @@ class GossipLearningCommunity(Community):
         expired = [tid for tid, data in self._outgoing_transfers.items() if current_time - data['timestamp'] > timeout]
         for tid in expired:
             del self._outgoing_transfers[tid]
+
+    async def _nack_incomplete_buffers(self):
+        """B6: Proactively NACK incomplete buffers older than threshold.
+
+        If the last chunk was dropped, the transfer would sit idle until the
+        300 s cleanup sweep.  This task detects gaps early and requests the
+        missing chunks so transfers recover faster.
+        """
+        import struct
+
+        now = time.time()
+        for (peer_mid, transfer_id), buffer in list(self._chunk_buffers.items()):
+            age = now - buffer.created_at
+            if age < EARLY_NACK_AGE_THRESHOLD:
+                continue
+            if buffer.is_complete():
+                continue
+
+            # Detect missing chunk indices
+            missing = [
+                i for i in range(buffer.total_chunks) if i not in buffer.chunks
+            ]
+            if not missing:
+                continue
+
+            # B5 rate-limit: consume a token for this peer
+            if not self._nack_try_consume(peer_mid):
+                logger.debug(
+                    f"Early-NACK rate-limited for peer {peer_mid[:16]}..."
+                )
+                continue
+
+            # Find the IPv8 Peer object for this peer_mid
+            target_peer = None
+            for peer_info in self.known_peers.values():
+                pmid = peer_info.peer.mid.hex() if isinstance(peer_info.peer.mid, bytes) else str(peer_info.peer.mid)
+                if pmid == peer_mid:
+                    target_peer = peer_info.peer
+                    break
+
+            if target_peer is None:
+                continue
+
+            missing_bytes = struct.pack(f'{len(missing)}I', *missing)
+            req_payload = RequestChunksPayload(
+                transfer_id=transfer_id,
+                sender_id=self.node_id,
+                missing_indices_bytes=missing_bytes
+            )
+            logger.debug(
+                f"Early-NACK: requesting {len(missing)} missing chunks "
+                f"for {transfer_id[:8]}... (age={age:.1f}s)"
+            )
+            self.ez_send(target_peer, req_payload)
 
     @lazy_wrapper(DiscoveryAnnouncePayload)
     async def on_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
@@ -765,55 +891,164 @@ class GossipLearningCommunity(Community):
                 exc_info=True,
             )
 
+    @lazy_wrapper(CheckpointPayload)
+    async def on_checkpoint(self, peer: Peer, payload: CheckpointPayload):
+        """Handle incoming checkpoint announcement (B2)."""
+        logger.debug(
+            f"Received checkpoint from {payload.sender_id} "
+            f"(round={payload.round_number}, loss={payload.loss:.4f})"
+        )
+        if payload.sender_id in self.known_peers:
+            self.known_peers[payload.sender_id].update_seen()
+
+        if self.on_checkpoint_callback:
+            await self.on_checkpoint_callback(
+                sender_id=payload.sender_id,
+                round_number=payload.round_number,
+                loss=payload.loss,
+                accuracy=payload.accuracy,
+                model_version=payload.model_version,
+            )
+
+    def broadcast_checkpoint(self, sender_id: str, round_number: int,
+                             loss: float, accuracy: float,
+                             model_version: str = "1.0.0"):
+        """Broadcast a checkpoint to all known compatible peers (B2)."""
+        payload = CheckpointPayload(
+            sender_id=sender_id,
+            round_number=round_number,
+            loss=loss,
+            accuracy=accuracy,
+            model_version=model_version,
+        )
+        for peer_info in self.known_peers.values():
+            try:
+                self.ez_send(peer_info.peer, payload)
+            except Exception as e:
+                logger.debug(
+                    f"Failed to send checkpoint to {peer_info.node_id}: {e}"
+                )
+        logger.debug(
+            f"Broadcast checkpoint round={round_number} to "
+            f"{len(self.known_peers)} peers"
+        )
+
+    def _nack_try_consume(self, peer_mid: str) -> bool:
+        """B5: Token-bucket rate limiter for NACK handling.
+
+        Returns True if the request is allowed (a token was consumed).
+        """
+        now = time.time()
+        bucket = self._nack_buckets.get(peer_mid)
+        if bucket is None:
+            bucket = {"tokens": NACK_BUCKET_MAX_TOKENS, "last_refill": now}
+            self._nack_buckets[peer_mid] = bucket
+
+        # Refill tokens
+        elapsed = now - bucket["last_refill"]
+        refill = elapsed / NACK_BUCKET_INTERVAL
+        if refill > 0:
+            bucket["tokens"] = min(
+                bucket["tokens"] + refill, NACK_BUCKET_MAX_TOKENS
+            )
+            bucket["last_refill"] = now
+
+        if bucket["tokens"] >= 1.0:
+            bucket["tokens"] -= 1.0
+            return True
+        return False
+
     @lazy_wrapper(RequestChunksPayload)
     async def on_request_chunks(self, peer: Peer, payload: RequestChunksPayload):
         """
         Handle request for missing chunks (NACK).
         Resends the requested chunks if available in cache.
         """
+        import struct
+
+        tid = payload.transfer_id
+        peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+
         logger.debug(
             f"Chunk request received from {payload.sender_id} "
-            f"(transfer={payload.transfer_id[:8]}...)"
+            f"(transfer={tid[:8]}...)"
         )
-        
-        if payload.transfer_id not in self._outgoing_transfers:
-            logger.warning(f"Request for unknown/expired transfer {payload.transfer_id} from {payload.sender_id}")
+
+        if tid not in self._outgoing_transfers:
+            logger.warning(f"Request for unknown/expired transfer {tid} from {payload.sender_id}")
             return
 
-        # Deserialize missing indices
-        import struct
+        transfer_data = self._outgoing_transfers[tid]
+
+        # B5: Authorize — only the original recipient may NACK
+        expected_mid = transfer_data.get("recipient_mid")
+        if expected_mid and peer_mid != expected_mid:
+            logger.warning(
+                f"NACK rejected: peer {peer_mid[:16]}... is not the "
+                f"original recipient of transfer {tid[:8]}..."
+            )
+            return
+
+        # B5: Per-transfer resend budget
+        resend_count = self._nack_resend_counts.get(tid, 0)
+        if resend_count >= NACK_MAX_RESENDS_PER_TRANSFER:
+            logger.warning(
+                f"NACK rejected: resend budget exhausted for transfer {tid[:8]}... "
+                f"({resend_count}/{NACK_MAX_RESENDS_PER_TRANSFER})"
+            )
+            return
+
+        # B5: Per-peer token bucket
+        if not self._nack_try_consume(peer_mid):
+            logger.warning(
+                f"NACK rate-limited for peer {peer_mid[:16]}..."
+            )
+            return
+
+        # B5: Validate missing_indices_bytes length
+        raw_len = len(payload.missing_indices_bytes)
+        if raw_len == 0 or raw_len % 4 != 0:
+            logger.warning(
+                f"Malformed NACK payload from {payload.sender_id}: "
+                f"missing_indices_bytes length={raw_len} is not a multiple of 4"
+            )
+            return
+
         try:
-            missing_count = len(payload.missing_indices_bytes) // 4
+            missing_count = raw_len // 4
             missing_indices = list(struct.unpack(f'{missing_count}I', payload.missing_indices_bytes))
         except Exception as e:
             logger.error(f"Failed to unpack missing indices: {e}")
             return
-            
-        logger.debug(
-            f"Resending {len(missing_indices)} missing chunks to {payload.sender_id} "
-            f"(transfer={payload.transfer_id[:8]}...)"
-        )
-        
-        transfer_data = self._outgoing_transfers[payload.transfer_id]
+
         weights_bytes = transfer_data['weights']
         total_chunks = (len(weights_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
-        
-        # Use cached metadata
+
+        # B5: Bound indices to total_chunks
+        valid_indices = [i for i in missing_indices if i < total_chunks]
+        if len(valid_indices) != len(missing_indices):
+            logger.debug(
+                f"Dropped {len(missing_indices) - len(valid_indices)} "
+                f"out-of-range indices from NACK for {tid[:8]}..."
+            )
+
+        logger.debug(
+            f"Resending {len(valid_indices)} missing chunks to {payload.sender_id} "
+            f"(transfer={tid[:8]}...)"
+        )
+
         loss_val = transfer_data.get('loss', 0.0)
         acc_val = transfer_data.get('accuracy', 0.0)
         round_num = transfer_data.get('round', 0)
         sample_cnt = transfer_data.get('samples', 0)
 
-        for i in missing_indices:
-            if i >= total_chunks:
-                continue
-                
+        for i in valid_indices:
             start = i * CHUNK_SIZE
             end = min(start + CHUNK_SIZE, len(weights_bytes))
             chunk_data = weights_bytes[start:end]
-            
+
             chunk_payload = ModelChunkPayload(
-                transfer_id=payload.transfer_id,
+                transfer_id=tid,
                 chunk_index=i,
                 total_chunks=total_chunks,
                 sender_id=self.node_id,
@@ -824,9 +1059,12 @@ class GossipLearningCommunity(Community):
                 accuracy=acc_val,
                 chunk_data=chunk_data
             )
-            
+
             self.ez_send(peer, chunk_payload)
-            await asyncio.sleep(0.002) # Same rate limit
+            await asyncio.sleep(0.002)
+
+        # B5: Increment resend counter
+        self._nack_resend_counts[tid] = resend_count + 1
 
     @lazy_wrapper(ModelChunkPayload)
     async def on_model_chunk(self, peer: Peer, payload: ModelChunkPayload):
@@ -840,7 +1078,52 @@ class GossipLearningCommunity(Community):
                 f"on_model_chunk called: chunk {payload.chunk_index}/{payload.total_chunks}"
             )
         transfer_id = payload.transfer_id  # Use the transfer_id from the sender (UUID)
-        
+        # B3: key by (peer.mid, transfer_id) so different endpoints cannot hijack
+        peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+        buf_key = (peer_mid, transfer_id)
+
+        # B4: Validate total_chunks before any allocation
+        if payload.total_chunks > MAX_CHUNKS_PER_TRANSFER:
+            logger.warning(
+                f"Rejected transfer {transfer_id[:8]}... from {payload.sender_id}: "
+                f"total_chunks={payload.total_chunks} > {MAX_CHUNKS_PER_TRANSFER}"
+            )
+            return
+
+        # B4: Enforce per-peer and global buffer caps on new buffer creation
+        if buf_key not in self._chunk_buffers:
+            # Per-peer transfer count
+            peer_transfers = sum(
+                1 for (pmid, _) in self._chunk_buffers if pmid == peer_mid
+            )
+            if peer_transfers >= MAX_CONCURRENT_TRANSFERS_PER_PEER:
+                logger.warning(
+                    f"Rejected transfer {transfer_id[:8]}... from {payload.sender_id}: "
+                    f"per-peer limit ({MAX_CONCURRENT_TRANSFERS_PER_PEER}) reached"
+                )
+                return
+
+            # Global transfer count
+            if len(self._chunk_buffers) >= MAX_TOTAL_TRANSFERS:
+                logger.warning(
+                    f"Rejected transfer {transfer_id[:8]}... from {payload.sender_id}: "
+                    f"global limit ({MAX_TOTAL_TRANSFERS}) reached"
+                )
+                return
+
+            # Per-peer byte budget
+            peer_bytes = sum(
+                sum(len(c) for c in buf.chunks.values())
+                for (pmid, _), buf in self._chunk_buffers.items()
+                if pmid == peer_mid
+            )
+            if peer_bytes >= MAX_BUFFERED_BYTES_PER_PEER:
+                logger.warning(
+                    f"Rejected transfer {transfer_id[:8]}... from {payload.sender_id}: "
+                    f"per-peer byte budget ({MAX_BUFFERED_BYTES_PER_PEER // (1024*1024)} MB) exhausted"
+                )
+                return
+
         # Log chunk receipt with visible print statements
         if payload.chunk_index == 0:
             logger.debug(
@@ -862,13 +1145,13 @@ class GossipLearningCommunity(Community):
         if payload.chunk_index == payload.total_chunks - 1:
             logger.debug(f"Received final chunk {payload.chunk_index + 1}/{payload.total_chunks} from {payload.sender_id}")
         
-        # Create or get buffer for this transfer
-        if transfer_id not in self._chunk_buffers:
+        # Create or get buffer for this transfer (keyed by endpoint identity)
+        if buf_key not in self._chunk_buffers:
             logger.debug(
                 f"Created chunk buffer {transfer_id[:8]}... "
                 f"starting at chunk {payload.chunk_index}"
             )
-            self._chunk_buffers[transfer_id] = ChunkBuffer(
+            self._chunk_buffers[buf_key] = ChunkBuffer(
                 transfer_id=transfer_id,
                 sender_id=payload.sender_id,
                 total_chunks=payload.total_chunks,
@@ -879,7 +1162,7 @@ class GossipLearningCommunity(Community):
                 accuracy=payload.accuracy
             )
         
-        buffer = self._chunk_buffers[transfer_id]
+        buffer = self._chunk_buffers[buf_key]
         
         # Add chunk to buffer
         is_complete = buffer.add_chunk(payload.chunk_index, payload.chunk_data)
@@ -907,7 +1190,7 @@ class GossipLearningCommunity(Community):
                 weights_bytes = buffer.reassemble()
                 
                 # Remove buffer
-                del self._chunk_buffers[transfer_id]
+                del self._chunk_buffers[buf_key]
                 
                 # Check size
                 if len(weights_bytes) > MAX_INCOMING_MESSAGE_SIZE:
@@ -954,8 +1237,8 @@ class GossipLearningCommunity(Community):
                     
             except Exception as e:
                 logger.error(f"Failed to reassemble/process chunked model from {payload.sender_id}: {e}")
-                if transfer_id in self._chunk_buffers:
-                    del self._chunk_buffers[transfer_id]
+                if buf_key in self._chunk_buffers:
+                    del self._chunk_buffers[buf_key]
         else:
             # Debug: if this is the final chunk but buffer is not complete, log missing chunks
             if payload.chunk_index == payload.total_chunks - 1:
@@ -1056,14 +1339,16 @@ class GossipLearningCommunity(Community):
                     f"(transfer={transfer_id[:8]}..., size={len(weights_bytes)} bytes, chunks={total_chunks})"
                 )
                 
-                # Cache transfer for retry
+                # Cache transfer for retry (B5: include recipient_mid for NACK auth)
+                recipient_mid = peer_info.peer.mid.hex() if isinstance(peer_info.peer.mid, bytes) else str(peer_info.peer.mid)
                 self._outgoing_transfers[transfer_id] = {
                     'weights': weights_bytes,
                     'loss': loss_val,
                     'accuracy': acc_val,
                     'round': round_number,
                     'samples': sample_count,
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'recipient_mid': recipient_mid,
                 }
                 
                 for i in range(total_chunks):
