@@ -38,6 +38,11 @@ class ConsensusTracker:
 
     When a sufficient fraction of peers report similar loss values
     within a checkpoint window, consensus is declared.
+
+    **Repeat-observation policy (A5 §3.2):** *freeze-first* — the first
+    checkpoint recorded for a given ``(peer_id, round_number)`` pair is
+    retained and subsequent submissions for the same pair are silently
+    ignored.  This prevents a single peer from ballot-stuffing a round.
     """
 
     def __init__(
@@ -45,16 +50,30 @@ class ConsensusTracker:
         checkpoint_interval: int = 10,
         consensus_threshold: float = 0.5,
         loss_tolerance: float = 0.05,
+        min_peers_for_consensus: int = 3,
+        max_round_ahead: int = 50,
     ):
         """
         Args:
             checkpoint_interval: Rounds between checkpoint collections.
             consensus_threshold: Fraction of peers required for consensus (0-1).
-            loss_tolerance: Maximum relative loss difference to count as agreement.
+            loss_tolerance: Maximum absolute loss difference to count as
+                agreement.  Uses ``max(loss_tolerance, 1e-6)`` internally
+                to handle the near-zero loss edge case (A5 §3.3).
+            min_peers_for_consensus: Minimum number of peers required
+                before consensus can be declared.  Even if all peers
+                agree, consensus is not reached when
+                ``total_peers < min_peers_for_consensus`` (A5 §3.1).
+            max_round_ahead: Maximum allowed round number relative to the
+                most recently seen checkpoint round.  ``record_checkpoint``
+                clamps higher values to prevent an attacker from
+                permanently disabling local checkpointing (A5 §3.2).
         """
         self.checkpoint_interval = checkpoint_interval
         self.consensus_threshold = consensus_threshold
-        self.loss_tolerance = loss_tolerance
+        self.loss_tolerance = max(loss_tolerance, 1e-6)
+        self.min_peers_for_consensus = min_peers_for_consensus
+        self.max_round_ahead = max_round_ahead
         self._checkpoints: Dict[int, Dict[str, PeerCheckpoint]] = {}
         self._last_checkpoint_round: int = 0
 
@@ -65,8 +84,34 @@ class ConsensusTracker:
 
     def record_checkpoint(self, checkpoint: PeerCheckpoint) -> None:
         rnd = checkpoint.round_number
+
+        # Clamp implausibly high round numbers (A5 §3.2)
+        max_allowed = self._last_checkpoint_round + self.max_round_ahead
+        if rnd > max_allowed:
+            logger.debug(
+                f"Clamping checkpoint round {rnd} → {max_allowed} "
+                f"(max_round_ahead={self.max_round_ahead})"
+            )
+            rnd = max_allowed
+            checkpoint = PeerCheckpoint(
+                peer_id=checkpoint.peer_id,
+                round_number=rnd,
+                loss=checkpoint.loss,
+                accuracy=checkpoint.accuracy,
+                model_version=checkpoint.model_version,
+            )
+
         if rnd not in self._checkpoints:
             self._checkpoints[rnd] = {}
+
+        # Freeze-first: ignore repeated submissions for (peer, round)
+        if checkpoint.peer_id in self._checkpoints[rnd]:
+            logger.debug(
+                f"Ignoring duplicate checkpoint from {checkpoint.peer_id} "
+                f"for round {rnd} (freeze-first policy)"
+            )
+            return
+
         self._checkpoints[rnd][checkpoint.peer_id] = checkpoint
         self._last_checkpoint_round = max(self._last_checkpoint_round, rnd)
 
@@ -100,16 +145,17 @@ class ConsensusTracker:
         mean_loss = sum(losses) / len(losses)
         mean_accuracy = sum(c.accuracy for c in peer_list) / len(peer_list)
 
-        if mean_loss == 0:
-            agreeing = [c for c in peer_list if c.loss == 0]
-        else:
-            agreeing = [
-                c for c in peer_list
-                if abs(c.loss - mean_loss) / max(abs(mean_loss), 1e-12) <= self.loss_tolerance
-            ]
+        # Absolute-tolerance comparison (A5 §3.3)
+        agreeing = [
+            c for c in peer_list
+            if abs(c.loss - mean_loss) <= self.loss_tolerance
+        ]
 
         agreement_ratio = len(agreeing) / total_peers
-        reached = agreement_ratio >= self.consensus_threshold
+        reached = (
+            agreement_ratio >= self.consensus_threshold
+            and total_peers >= self.min_peers_for_consensus
+        )
 
         return ConsensusResult(
             reached=reached,
