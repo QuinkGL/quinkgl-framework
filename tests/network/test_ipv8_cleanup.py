@@ -1,5 +1,5 @@
 """
-B8 regression tests — Clean up half-started IPv8.
+regression tests — Clean up half-started IPv8.
 
 Validates that:
  - IPv8Manager.stop() is idempotent (safe to call multiple times or before start).

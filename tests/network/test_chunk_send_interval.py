@@ -1,5 +1,5 @@
 """
-B7 regression tests — Deduplicate chunk rate-limiting.
+regression tests — Deduplicate chunk rate-limiting.
 
 Validates that:
  - CHUNK_SEND_INTERVAL is a positive constant exposed at module level.

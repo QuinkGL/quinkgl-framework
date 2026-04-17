@@ -169,6 +169,8 @@ class GossipNode:
         # State
         self.running = False
         self._ipv8_failed = False
+        # Track the gossip-loop task so shutdown can cancel it
+        self._run_task: Optional[asyncio.Task] = None
         self._telemetry_client = None
 
         # Callbacks for tunnel messages
@@ -310,8 +312,14 @@ class GossipNode:
                 self.gl_node.aggregator._prototype_store = PrototypeStore()
 
             # Step 2: Wait for peer discovery with remaining timeout
+            # Guarantee at least MIN_PEER_DISCOVERY_WINDOW seconds for
+            # discovery even if IPv8 start consumed most of the budget.
+            MIN_PEER_DISCOVERY_WINDOW = 5.0
             elapsed = time.time() - start_time
-            remaining_timeout = max(0, self.fallback_timeout - elapsed)
+            remaining_timeout = max(
+                MIN_PEER_DISCOVERY_WINDOW,
+                self.fallback_timeout - elapsed,
+            )
 
             if remaining_timeout > 0:
                 try:
@@ -321,12 +329,23 @@ class GossipNode:
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"Peer discovery timed out after {self.fallback_timeout}s total")
-                    # IPv8 started but no peers discovered - could still work
-                    # Continue in P2P mode, peers may discover later
-                    logger.debug("Continuing in P2P mode (peers may discover later)")
 
             # Sync known peers
             self._sync_known_peers()
+
+            peer_count = self.community.get_peer_count()
+
+            # If zero peers discovered and fallback is available, treat
+            # this as an IPv8 failure so the caller can trigger tunnel mode
+            # instead of running with an empty overlay.
+            if peer_count == 0 and self.enable_fallback and self.tunnel_server:
+                logger.warning(
+                    "IPv8 started but 0 peers discovered — "
+                    "treating as failure so tunnel fallback can activate"
+                )
+                await self.ipv8_manager.stop()
+                self._ipv8_failed = True
+                return False
 
             # Start Cyclon topology if applicable
             from quinkgl.topology.cyclon import CyclonTopology
@@ -341,7 +360,6 @@ class GossipNode:
                 await self.gl_node.topology.start(context)
                 logger.debug("Cyclon topology started with periodic shuffle")
 
-            peer_count = self.community.get_peer_count()
             logger.debug(f"IPv8 P2P ready with {peer_count} peers discovered")
 
             return True
@@ -615,9 +633,19 @@ class GossipNode:
 
                 data = json.loads(msg.text)
 
-                if data.get("type") == "MODEL_UPDATE":
+                # Null-check required fields
+                msg_type = data.get("type")
+                if not msg_type:
+                    logger.debug("Tunnel message missing 'type' field — ignored")
+                    return
+
+                if msg_type == "MODEL_UPDATE":
+                    # Require essential fields
+                    if not all(k in data for k in ("sender_id", "round_number", "weights")):
+                        logger.warning("MODEL_UPDATE missing required fields — ignored")
+                        return
                     await self._on_tunnel_model_update(data)
-                elif data.get("type") == "PEER_ANNOUNCE":
+                elif msg_type == "PEER_ANNOUNCE":
                     peer_info = data.get("peer_info", {})
                     self._tunnel_peers[peer_info.get("node_id")] = peer_info
 
@@ -644,8 +672,13 @@ class GossipNode:
         self.tunnel_client.on_chat_message = on_tunnel_message
 
         # Handle peer list updates from tunnel
+        # B16 §5.6: Re-announce when new peers appear, not just at startup
         async def on_peer_list(peer_ids: list):
             logger.debug(f"Tunnel server reports {len(peer_ids)} connected peers")
+            new_peers = [p for p in peer_ids if p not in self._tunnel_peers]
+            if new_peers:
+                logger.debug(f"New tunnel peers detected: {new_peers} — re-announcing")
+                await self._announce_to_tunnel()
 
         self.tunnel_client.on_peer_list = on_peer_list
 
@@ -687,10 +720,10 @@ class GossipNode:
         if not self.running:
             raise RuntimeError("Node must be started before running")
 
-        # Setup send callback based on connection mode
-        if self.connection_mode == ConnectionMode.IPV8_P2P:
-            async def send_to_peer(peer_id: str, message):
-                """Send message via IPv8."""
+        # Single dynamic dispatch — reads connection_mode on each call
+        # so failback / mode changes take effect immediately.
+        async def send_to_peer(peer_id: str, message):
+            if self.connection_mode == ConnectionMode.IPV8_P2P:
                 await self.community.send_model_update(
                     target_node_id=peer_id,
                     weights=message.weights,
@@ -699,9 +732,7 @@ class GossipNode:
                     loss=message.loss,
                     accuracy=message.accuracy
                 )
-        else:
-            async def send_to_peer(peer_id: str, message):
-                """Send message via tunnel fallback."""
+            else:
                 await self._send_model_update_via_tunnel(peer_id, message)
 
         self.gl_node.aggregator.send_message_callback = send_to_peer
@@ -714,8 +745,12 @@ class GossipNode:
         if self.connection_mode == ConnectionMode.TUNNEL_RELAY:
             await self._announce_to_tunnel()
 
-        # Run the gossip loop
-        await self.gl_node.run_continuous(data_provider=data_provider or data)
+        # B13: Track the gossip-loop task so shutdown() can cancel it
+        self._run_task = asyncio.current_task()
+        try:
+            await self.gl_node.run_continuous(data_provider=data_provider or data)
+        finally:
+            self._run_task = None
 
     async def _send_model_update_via_tunnel(self, peer_id: str, message):
         """Send model update via tunnel relay."""
@@ -742,8 +777,16 @@ class GossipNode:
                 "weights": weights_bytes.hex()  # Convert bytes to hex for JSON
             }
 
-            # Send via tunnel chat (hacky but works for fallback)
-            await self.tunnel_client.send_chat_message(peer_id, json.dumps(payload))
+            # Pre-send size check against gRPC max message length
+            GRPC_MAX_MSG_BYTES = 50 * 1024 * 1024  # 50 MB (matches server config)
+            payload_json = json.dumps(payload)
+            if len(payload_json.encode("utf-8")) > GRPC_MAX_MSG_BYTES:
+                raise ValueError(
+                    f"Tunnel payload too large ({len(payload_json) / 1024 / 1024:.1f} MB) "
+                    f"— exceeds gRPC max message length"
+                )
+
+            await self.tunnel_client.send_chat_message(peer_id, payload_json)
             logger.debug(f"Sent model update to {peer_id} via tunnel")
 
         except Exception as e:
@@ -787,6 +830,14 @@ class GossipNode:
 
     async def shutdown(self):
         """Full shutdown including IPv8 and tunnel."""
+        # Cancel the gossip-loop task first, then await it
+        if self._run_task and not self._run_task.done():
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except asyncio.CancelledError:
+                pass
+
         self.stop()
 
         # Stop Cyclon topology if running

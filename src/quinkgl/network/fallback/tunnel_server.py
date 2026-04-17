@@ -22,6 +22,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Server-side limits
+MAX_TUNNELS = 500
+MAX_SIGNALING_SESSIONS = 1000
+SIGNALING_SESSION_TIMEOUT = timedelta(minutes=10)
+PER_CLIENT_QUEUE_MAXSIZE = 256
+
+
 class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
     """gRPC tunnel service implementation."""
     
@@ -36,7 +43,8 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
     async def RegisterTunnel(self, request_iterator, context):
         """Handle bidirectional tunnel stream."""
         node_id = None
-        message_queue = asyncio.Queue()
+        # B17 §6.4: Bounded per-client queue
+        message_queue = asyncio.Queue(maxsize=PER_CLIENT_QUEUE_MAXSIZE)
         
         try:
             # Handle incoming messages
@@ -46,27 +54,58 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
                     async for msg in request_iterator:
                         try:
                             if msg.type == tunnel_pb2.REGISTER:
-                                # Register new tunnel
+                                # B17 §6.1: Reject duplicate registrations
+                                if msg.node_id in self.tunnels:
+                                    logger.warning(
+                                        f"Duplicate REGISTER for '{msg.node_id}' — rejected"
+                                    )
+                                    continue
+
+                                # B17 §6.2: Enforce tunnel capacity
+                                if len(self.tunnels) >= MAX_TUNNELS:
+                                    logger.warning(
+                                        f"Tunnel capacity reached ({MAX_TUNNELS}) — "
+                                        f"rejecting '{msg.node_id}'"
+                                    )
+                                    continue
+
                                 node_id = msg.node_id
                                 self.tunnels[node_id] = message_queue
                                 self.last_seen[node_id] = datetime.now()
                                 logger.info(f"✓ Registered tunnel for node '{node_id}'")
                                 
-                                # Broadcast updated peer list to ALL connected peers
+                                # B17 §6.3: Incremental peer notification
+                                # Send full peer list only to the NEW node.
+                                # Send a single-element diff (new-peer-joined) to existing nodes.
                                 peer_ids = list(self.tunnels.keys())
-                                logger.info(f"Broadcasting peer list update: {peer_ids}")
-                                
+                                ts_now = int(time.time() * 1000)
+
+                                # New node gets full list
+                                others = [p for p in peer_ids if p != node_id]
+                                new_peer_list = tunnel_pb2.PeerListPayload(peer_ids=others)
+                                await message_queue.put(tunnel_pb2.TunnelMessage(
+                                    node_id="server",
+                                    target_id=node_id,
+                                    type=tunnel_pb2.PEER_LIST,
+                                    payload=new_peer_list.SerializeToString(),
+                                    timestamp=ts_now,
+                                ))
+
+                                # Existing nodes get incremental diff
+                                diff_list = tunnel_pb2.PeerListPayload(peer_ids=[node_id])
                                 for pid, queue in self.tunnels.items():
-                                    others = [p for p in peer_ids if p != pid]
-                                    peer_list = tunnel_pb2.PeerListPayload(peer_ids=others)
-                                    update_msg = tunnel_pb2.TunnelMessage(
-                                        node_id="server",
-                                        target_id=pid,
-                                        type=tunnel_pb2.PEER_LIST,
-                                        payload=peer_list.SerializeToString(),
-                                        timestamp=int(time.time() * 1000)
-                                    )
-                                    await queue.put(update_msg)
+                                    if pid == node_id:
+                                        continue
+                                    try:
+                                        queue.put_nowait(tunnel_pb2.TunnelMessage(
+                                            node_id="server",
+                                            target_id=pid,
+                                            type=tunnel_pb2.PEER_LIST,
+                                            payload=diff_list.SerializeToString(),
+                                            timestamp=ts_now,
+                                        ))
+                                    except asyncio.QueueFull:
+                                        logger.warning(f"Queue full for {pid}, skipping diff")
                             
                             elif msg.type == tunnel_pb2.HEARTBEAT:
                                 if msg.node_id in self.last_seen:
@@ -209,6 +248,16 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
                     del self.tunnels[node_id]
                 if node_id in self.last_seen:
                     del self.last_seen[node_id]
+
+            # B17 §6.2: Prune stale signaling sessions
+            stale_sessions = [
+                sid for sid, sess in self.signaling_sessions.items()
+                if now - sess.get("created_at", now) > SIGNALING_SESSION_TIMEOUT
+            ]
+            for sid in stale_sessions:
+                del self.signaling_sessions[sid]
+            if stale_sessions:
+                logger.info(f"Pruned {len(stale_sessions)} stale signaling sessions")
 
 async def serve(host: str, port: int):
     """Start the tunnel server."""

@@ -7,6 +7,7 @@ Message types and protocol definitions for P2P gossip learning.
 from enum import IntEnum
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+import time
 from datetime import datetime
 
 
@@ -211,8 +212,8 @@ class GossipProtocol:
     gossip messages between peers.
     """
 
-    # Maximum message age for validation (1 hour)
-    MAX_MESSAGE_AGE_SECONDS = 3600
+    # B15: Tightened from 3600s to 300s (5 minutes)
+    MAX_MESSAGE_AGE_SECONDS = 300
 
     def __init__(self, peer_id: str):
         """
@@ -292,13 +293,17 @@ class GossipProtocol:
             # Don't process messages from self
             return False
 
-        # Timestamp validation - reject very old messages
-        message_age = datetime.now() - message.timestamp
-        if message_age.total_seconds() > self.MAX_MESSAGE_AGE_SECONDS:
+        # B15: Monotonic freshness check — avoids clock-skew issues
+        # message.timestamp is a datetime; convert to epoch for comparison.
+        try:
+            msg_epoch = message.timestamp.timestamp()
+        except (AttributeError, OSError):
             return False
-
-        # Reject messages from the future (clock skew protection)
-        if message_age.total_seconds() < -60:  # 1 minute tolerance
+        age = time.time() - msg_epoch
+        if age > self.MAX_MESSAGE_AGE_SECONDS:
+            return False
+        # Reject messages from the future (1 minute tolerance)
+        if age < -60:
             return False
 
         return True

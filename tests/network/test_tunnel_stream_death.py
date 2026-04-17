@@ -1,5 +1,5 @@
 """
-B9 regression tests — Detect tunnel stream death and surface it.
+regression tests — Detect tunnel stream death and surface it.
 
 Validates that:
  - TunnelClient has an on_disconnected callback.

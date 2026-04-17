@@ -1,5 +1,5 @@
 """
-B10 regression tests — Tunnel reconnect with exponential backoff.
+regression tests — Tunnel reconnect with exponential backoff.
 
 Validates that:
  - Reconnect constants are defined.
