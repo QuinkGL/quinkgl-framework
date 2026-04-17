@@ -280,6 +280,8 @@ class GossipNode:
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"IPv8 start timed out after {self.fallback_timeout}s")
+                # B8: Clean up half-started IPv8 (ports, tasks, community)
+                await self.ipv8_manager.stop()
                 return False
 
             # Get community reference
@@ -346,6 +348,8 @@ class GossipNode:
 
         except Exception as e:
             logger.warning(f"IPv8 P2P failed: {e}")
+            # B8: Clean up any partially-started IPv8 resources
+            await self.ipv8_manager.stop()
             self._ipv8_failed = True
             return False
 
@@ -645,6 +649,13 @@ class GossipNode:
 
         self.tunnel_client.on_peer_list = on_peer_list
 
+        # B9: Detect tunnel stream death
+        async def on_tunnel_disconnected():
+            logger.warning("Tunnel stream died — marking tunnel as disconnected")
+            self._tunnel_connected = False
+
+        self.tunnel_client.on_disconnected = on_tunnel_disconnected
+
     def _sync_known_peers(self):
         """Sync known peers from community to LearningNode."""
         if not self.community:
@@ -709,8 +720,8 @@ class GossipNode:
     async def _send_model_update_via_tunnel(self, peer_id: str, message):
         """Send model update via tunnel relay."""
         if not self.tunnel_client or not self._tunnel_connected:
-            logger.warning(f"Cannot send to {peer_id}: tunnel not connected")
-            return
+            # B9: Raise so Track A's per-peer try/except logs the failure
+            raise ConnectionError(f"Cannot send to {peer_id}: tunnel not connected")
 
         import json
         from quinkgl.network.model_serializer import serialize_model

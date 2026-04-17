@@ -33,6 +33,10 @@ MAX_INCOMING_MESSAGE_SIZE = 150 * 1024 * 1024
 # Using 1024 bytes to be safe and avoid IP fragmentation which causes high packet loss.
 CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
 
+# B7: Inter-chunk send delay (seconds) — prevents UDP buffer overflow on receiver.
+# At 1 KB/chunk this yields ~83 KB/s sustained throughput.
+CHUNK_SEND_INTERVAL = 0.012
+
 # Timeout for incomplete transfers (300 seconds - increased for Colab/slow networks)
 CHUNK_TRANSFER_TIMEOUT = 300
 
@@ -1379,11 +1383,9 @@ class GossipLearningCommunity(Community):
                             f"{i + 1}/{total_chunks} ({progress:.0f}%)"
                         )
                     
-                    # Rate limiting: 2ms delay between chunks (1KB each)
-                    # This prevents UDP buffer overflow on receiver
-                    await asyncio.sleep(0.002)
-                    if i < total_chunks - 1:  # Don't sleep after the last chunk
-                        await asyncio.sleep(0.01)
+                    # B7: Single inter-chunk delay (was two separate sleeps)
+                    if i < total_chunks - 1:
+                        await asyncio.sleep(CHUNK_SEND_INTERVAL)
                 
                 logger.debug(f"Sent {total_chunks} chunks to {target_node_id}")
             
