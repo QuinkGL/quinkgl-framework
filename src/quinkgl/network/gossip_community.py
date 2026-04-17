@@ -12,6 +12,7 @@ import asyncio
 import time
 import logging
 import hashlib
+import struct
 import uuid
 from typing import Optional, Callable, List, Any, Dict
 from dataclasses import dataclass, field
@@ -33,6 +34,10 @@ MAX_INCOMING_MESSAGE_SIZE = 150 * 1024 * 1024
 # Using 1024 bytes to be safe and avoid IP fragmentation which causes high packet loss.
 CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
 
+# B7: Inter-chunk send delay (seconds) — prevents UDP buffer overflow on receiver.
+# At 1 KB/chunk this yields ~83 KB/s sustained throughput.
+CHUNK_SEND_INTERVAL = 0.012
+
 # Timeout for incomplete transfers (300 seconds - increased for Colab/slow networks)
 CHUNK_TRANSFER_TIMEOUT = 300
 
@@ -49,6 +54,9 @@ NACK_BUCKET_MAX_TOKENS = 5   # max burst per peer
 
 # B6: Early NACK gap detection
 EARLY_NACK_AGE_THRESHOLD = 5.0  # seconds since buffer creation before probing
+
+# B16 §4.8: Hard byte cap on fingerprint JSON in discovery announcements
+MAX_FINGERPRINT_BYTES = 8192  # 8 KB
 
 
 def generate_community_id(domain: str, data_schema_hash: str) -> bytes:
@@ -68,10 +76,47 @@ def generate_community_id(domain: str, data_schema_hash: str) -> bytes:
     # Combine domain and schema
     combined = f"QuinkGL-{domain}-{data_schema_hash}".encode('utf-8')
 
-    # Hash to get 20 bytes (SHA-1 produces 20 bytes)
-    hashed = hashlib.sha1(combined).digest()
+    # B16 §4.9: SHA-256 truncated to 20 bytes (replaces SHA-1)
+    hashed = hashlib.sha256(combined).digest()[:20]
 
     return hashed
+
+
+def _chunk_sign_data(sender_id: str, round_number: int, data_schema_hash: str,
+                     chunk_index: int, chunk_data: bytes) -> bytes:
+    """B14: Build the canonical byte string that is signed per chunk.
+
+    ``sender_id || round_number || data_schema_hash || chunk_index || SHA-256(chunk_data)``
+    """
+    return (
+        sender_id.encode("utf-8")
+        + struct.pack("!I", round_number)
+        + data_schema_hash.encode("utf-8")
+        + struct.pack("!I", chunk_index)
+        + hashlib.sha256(chunk_data).digest()
+    )
+
+
+def _chunk_sign(private_key, sender_id: str, round_number: int,
+                data_schema_hash: str, chunk_index: int, chunk_data: bytes) -> bytes:
+    """B14: Sign a chunk using the IPv8 peer's private key."""
+    msg = _chunk_sign_data(sender_id, round_number, data_schema_hash,
+                           chunk_index, chunk_data)
+    return private_key.signature(msg)
+
+
+def _chunk_verify(public_key, signature: bytes, sender_id: str,
+                  round_number: int, data_schema_hash: str,
+                  chunk_index: int, chunk_data: bytes) -> bool:
+    """B14: Verify a chunk signature against the sender's public key."""
+    if not signature:
+        return False
+    msg = _chunk_sign_data(sender_id, round_number, data_schema_hash,
+                           chunk_index, chunk_data)
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
 
 
 class DiscoveryAnnouncePayload(Payload):
@@ -125,7 +170,7 @@ class ModelUpdatePayload(Payload):
     NOTE: Uses 'varlenI' for weights_bytes (large model), 'varlenH' for others
     """
     msg_id = 2
-    format_list = ['varlenH', 'varlenI', 'I', 'I', 'varlenH', 'd', 'd', 'I']
+    format_list = ['varlenH', 'varlenI', 'I', 'I', 'varlenH', 'd', 'd', 'I', 'varlenH']
 
     def __init__(
         self,
@@ -136,7 +181,8 @@ class ModelUpdatePayload(Payload):
         data_schema_hash: str,
         loss: float = 0.0,
         accuracy: float = 0.0,
-        timestamp: int = 0
+        timestamp: int = 0,
+        signature: bytes = b""
     ):
         super().__init__()
         self.sender_id = sender_id
@@ -147,6 +193,7 @@ class ModelUpdatePayload(Payload):
         self.loss = loss
         self.accuracy = accuracy
         self.timestamp = timestamp or int(time.time())
+        self.signature = signature
 
     def to_pack_list(self):
         return [
@@ -157,7 +204,8 @@ class ModelUpdatePayload(Payload):
             ('varlenH', self.data_schema_hash.encode('utf-8')),
             ('d', self.loss),
             ('d', self.accuracy),
-            ('I', self.timestamp)
+            ('I', self.timestamp),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
@@ -170,7 +218,8 @@ class ModelUpdatePayload(Payload):
             args[4].decode('utf-8'),
             args[5],
             args[6],
-            args[7]
+            args[7],
+            args[8] if len(args) > 8 else b"",  # signature
         )
 
 
@@ -274,10 +323,11 @@ class ModelChunkPayload(Payload):
         loss: Training loss
         accuracy: Training accuracy
         chunk_data: The actual chunk bytes
+        signature: B14 — cryptographic signature over critical fields
     """
     msg_id = 4
     # varlenH for strings, I for ints, d for floats, varlenH for chunk data
-    format_list = ['varlenH', 'I', 'I', 'varlenH', 'varlenH', 'I', 'I', 'd', 'd', 'varlenH']
+    format_list = ['varlenH', 'I', 'I', 'varlenH', 'varlenH', 'I', 'I', 'd', 'd', 'varlenH', 'varlenH']
 
     def __init__(
         self,
@@ -290,7 +340,8 @@ class ModelChunkPayload(Payload):
         sample_count: int,
         loss: float,
         accuracy: float,
-        chunk_data: bytes
+        chunk_data: bytes,
+        signature: bytes = b""
     ):
         super().__init__()
         self.transfer_id = transfer_id
@@ -303,6 +354,7 @@ class ModelChunkPayload(Payload):
         self.loss = loss
         self.accuracy = accuracy
         self.chunk_data = chunk_data
+        self.signature = signature
 
     def to_pack_list(self):
         return [
@@ -315,7 +367,8 @@ class ModelChunkPayload(Payload):
             ('I', self.sample_count),
             ('d', self.loss),
             ('d', self.accuracy),
-            ('varlenH', self.chunk_data)
+            ('varlenH', self.chunk_data),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
@@ -330,7 +383,8 @@ class ModelChunkPayload(Payload):
             args[6],                   # sample_count
             args[7],                   # loss
             args[8],                   # accuracy
-            args[9]                    # chunk_data (bytes)
+            args[9],                   # chunk_data (bytes)
+            args[10] if len(args) > 10 else b"",  # signature
         )
 
 
@@ -535,18 +589,19 @@ class GossipLearningCommunity(Community):
         self.data_schema_hash = data_schema_hash
         self.model_version = model_version
 
-        # Generate community ID from domain + schema
-        self._instance_community_id = generate_community_id(domain, data_schema_hash)
-
-        # Set community_id as class variable for IPv8
-        # Note: This affects all instances of this class
-        type(self).community_id = self._instance_community_id
+        # B16 §4.5: Instance-level community_id (no class mutation)
+        # IPv8 reads self.community_id; setting it on the instance shadows
+        # the class attribute without clobbering other instances.
+        self.community_id = generate_community_id(domain, data_schema_hash)
+        self._instance_community_id = self.community_id
 
         # Initialize parent with all args
         super().__init__(*args, **kwargs)
 
         # Peer tracking
         self.known_peers: dict[str, PeerInfo] = {}  # node_id -> PeerInfo
+        # §4.4: reverse lookup — peer.mid hex → node_id
+        self._mid_to_node_id: dict[str, str] = {}
 
         # Heartbeat
         self._heartbeat_sequence = 0
@@ -564,6 +619,9 @@ class GossipLearningCommunity(Community):
         self._nack_resend_counts: Dict[str, int] = {}
         # peer_mid -> { 'tokens': float, 'last_refill': float }
         self._nack_buckets: Dict[str, Dict] = {}
+
+        # B15: Replay protection — per-peer last seen round
+        self._last_seen_round: Dict[str, int] = {}
 
         # Message handlers
         self.add_message_handler(DiscoveryAnnouncePayload, self.on_discovery_announce)
@@ -693,6 +751,9 @@ class GossipLearningCommunity(Community):
 
         for node_id in stale_peers:
             peer_info = self.known_peers.pop(node_id)
+            # §4.4: clean up reverse lookup
+            pmid = peer_info.peer.mid.hex() if isinstance(peer_info.peer.mid, bytes) else str(peer_info.peer.mid)
+            self._mid_to_node_id.pop(pmid, None)
             logger.debug(f"Removed stale peer: {node_id}")
             if self.on_peer_left_callback:
                 await self.on_peer_left_callback(node_id)
@@ -785,13 +846,20 @@ class GossipLearningCommunity(Community):
 
         fingerprint = None
         if payload.fingerprint_json:
-            try:
-                import json
-                from quinkgl.fingerprint.fingerprint import DataFingerprint
-                fp_dict = json.loads(payload.fingerprint_json)
-                fingerprint = DataFingerprint.from_dict(fp_dict)
-            except (json.JSONDecodeError, Exception):
-                logger.debug(f"Could not parse fingerprint from {payload.node_id}")
+            # B16 §4.8: Hard byte cap on fingerprint JSON
+            if len(payload.fingerprint_json.encode("utf-8")) > MAX_FINGERPRINT_BYTES:
+                logger.warning(
+                    f"Rejected oversized fingerprint from {payload.node_id}: "
+                    f"{len(payload.fingerprint_json)} chars"
+                )
+            else:
+                try:
+                    import json
+                    from quinkgl.fingerprint.fingerprint import DataFingerprint
+                    fp_dict = json.loads(payload.fingerprint_json)
+                    fingerprint = DataFingerprint.from_dict(fp_dict)
+                except (json.JSONDecodeError, Exception):
+                    logger.debug(f"Could not parse fingerprint from {payload.node_id}")
 
         if payload.node_id in self.known_peers:
             self.known_peers[payload.node_id].update_seen()
@@ -807,6 +875,9 @@ class GossipLearningCommunity(Community):
             )
             peer_info.data_fingerprint = fingerprint
             self.known_peers[payload.node_id] = peer_info
+            # §4.4: record mid → node_id binding
+            pmid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+            self._mid_to_node_id[pmid] = payload.node_id
             logger.debug(f"Peer address discovered: {payload.node_id} @ {peer.address}")
             logger.debug(f"Discovered compatible peer: {payload.node_id}")
 
@@ -821,6 +892,44 @@ class GossipLearningCommunity(Community):
         Deserializes weights and passes to callback.
         """
         logger.debug(f"on_model_update called: sender={payload.sender_id}, round={payload.round_number}")
+
+        # §4.4: Verify sender identity — payload.sender_id must match the
+        # node_id we recorded for this peer.mid during discovery.
+        peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+        expected_node_id = self._mid_to_node_id.get(peer_mid)
+        if expected_node_id is not None and payload.sender_id != expected_node_id:
+            logger.warning(
+                f"Identity mismatch: peer.mid={peer_mid[:12]}... claims "
+                f"sender_id={payload.sender_id}, expected {expected_node_id}"
+            )
+            return
+
+        # Verify direct-path signature (chunk_index=0, full weights as chunk_data)
+        if payload.signature:
+            if not _chunk_verify(
+                peer.public_key, payload.signature,
+                payload.sender_id, payload.round_number,
+                payload.data_schema_hash, 0, payload.weights_bytes,
+            ):
+                logger.warning(
+                    f"Rejected direct model from {payload.sender_id}: invalid signature"
+                )
+                return
+        else:
+            logger.debug(
+                f"Unsigned direct model from {payload.sender_id} (no signature)"
+            )
+
+        # B15: Replay protection — reject stale or replayed rounds
+        peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+        last_round = self._last_seen_round.get(peer_mid, -1)
+        if payload.round_number <= last_round:
+            logger.warning(
+                f"Rejected replayed model from {payload.sender_id}: "
+                f"round {payload.round_number} <= last seen {last_round}"
+            )
+            return
+        self._last_seen_round[peer_mid] = payload.round_number
 
         # Check message size before deserializing to prevent DoS
         weights_size = len(payload.weights_bytes)
@@ -1047,6 +1156,13 @@ class GossipLearningCommunity(Community):
             end = min(start + CHUNK_SIZE, len(weights_bytes))
             chunk_data = weights_bytes[start:end]
 
+            # B14: Sign resent chunks
+            sig = _chunk_sign(
+                self.my_peer.key,
+                self.node_id, round_num,
+                self.data_schema_hash, i, chunk_data,
+            )
+
             chunk_payload = ModelChunkPayload(
                 transfer_id=tid,
                 chunk_index=i,
@@ -1057,7 +1173,8 @@ class GossipLearningCommunity(Community):
                 sample_count=sample_cnt,
                 loss=loss_val,
                 accuracy=acc_val,
-                chunk_data=chunk_data
+                chunk_data=chunk_data,
+                signature=sig,
             )
 
             self.ez_send(peer, chunk_payload)
@@ -1082,6 +1199,36 @@ class GossipLearningCommunity(Community):
         peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
         buf_key = (peer_mid, transfer_id)
 
+        # §4.4: Verify sender identity against peer.mid binding
+        expected_node_id = self._mid_to_node_id.get(peer_mid)
+        if expected_node_id is not None and payload.sender_id != expected_node_id:
+            logger.warning(
+                f"Identity mismatch in chunk: peer.mid={peer_mid[:12]}... claims "
+                f"sender_id={payload.sender_id}, expected {expected_node_id}"
+            )
+            return
+
+        # B14: Verify chunk signature against the sender's public key
+        if payload.signature:
+            if not _chunk_verify(
+                peer.public_key, payload.signature,
+                payload.sender_id, payload.round_number,
+                payload.data_schema_hash, payload.chunk_index,
+                payload.chunk_data,
+            ):
+                logger.warning(
+                    f"Rejected chunk {payload.chunk_index} of {transfer_id[:8]}... "
+                    f"from {payload.sender_id}: invalid signature"
+                )
+                return
+        else:
+            # Unsigned chunks are accepted with a debug note — allows
+            # gradual rollout and backward-compat with older peers.
+            logger.debug(
+                f"Unsigned chunk {payload.chunk_index} of {transfer_id[:8]}... "
+                f"from {payload.sender_id} (no signature)"
+            )
+
         # B4: Validate total_chunks before any allocation
         if payload.total_chunks > MAX_CHUNKS_PER_TRANSFER:
             logger.warning(
@@ -1092,6 +1239,16 @@ class GossipLearningCommunity(Community):
 
         # B4: Enforce per-peer and global buffer caps on new buffer creation
         if buf_key not in self._chunk_buffers:
+            # B15: Replay protection for chunked transfers
+            last_round = self._last_seen_round.get(peer_mid, -1)
+            if payload.round_number <= last_round:
+                logger.warning(
+                    f"Rejected chunked transfer {transfer_id[:8]}... from "
+                    f"{payload.sender_id}: round {payload.round_number} "
+                    f"<= last seen {last_round}"
+                )
+                return
+
             # Per-peer transfer count
             peer_transfers = sum(
                 1 for (pmid, _) in self._chunk_buffers if pmid == peer_mid
@@ -1200,6 +1357,12 @@ class GossipLearningCommunity(Community):
                     )
                     return
                 
+                # B15: Update replay protection on successful reassembly
+                self._last_seen_round[peer_mid] = max(
+                    self._last_seen_round.get(peer_mid, -1),
+                    buffer.round_number,
+                )
+
                 # Deserialize
                 weights = deserialize_model(weights_bytes)
                 
@@ -1313,6 +1476,12 @@ class GossipLearningCommunity(Community):
             # Check if we need chunked transfer
             if len(weights_bytes) <= CHUNK_SIZE:
                 # Small payload - use direct transfer (original method)
+                # Sign the direct payload (same canonical form as chunked, chunk_index=0)
+                sig = _chunk_sign(
+                    self.my_peer.key,
+                    self.node_id, round_number,
+                    self.data_schema_hash, 0, weights_bytes,
+                )
                 payload = ModelUpdatePayload(
                     sender_id=self.node_id,
                     weights_bytes=weights_bytes,
@@ -1320,7 +1489,8 @@ class GossipLearningCommunity(Community):
                     round_number=round_number,
                     data_schema_hash=self.data_schema_hash,
                     loss=loss_val,
-                    accuracy=acc_val
+                    accuracy=acc_val,
+                    signature=sig,
                 )
                 self.ez_send(peer_info.peer, payload)
                 logger.debug(f"Sent model update to {target_node_id} ({len(weights_bytes)} bytes)")
@@ -1356,6 +1526,13 @@ class GossipLearningCommunity(Community):
                     end = min(start + CHUNK_SIZE, len(weights_bytes))
                     chunk_data = weights_bytes[start:end]
                     
+                    # B14: Sign each chunk
+                    sig = _chunk_sign(
+                        self.my_peer.key,
+                        self.node_id, round_number,
+                        self.data_schema_hash, i, chunk_data,
+                    )
+
                     chunk_payload = ModelChunkPayload(
                         transfer_id=transfer_id,
                         chunk_index=i,
@@ -1366,7 +1543,8 @@ class GossipLearningCommunity(Community):
                         sample_count=sample_count,
                         loss=loss_val,
                         accuracy=acc_val,
-                        chunk_data=chunk_data
+                        chunk_data=chunk_data,
+                        signature=sig,
                     )
                     
                     self.ez_send(peer_info.peer, chunk_payload)
@@ -1379,11 +1557,9 @@ class GossipLearningCommunity(Community):
                             f"{i + 1}/{total_chunks} ({progress:.0f}%)"
                         )
                     
-                    # Rate limiting: 2ms delay between chunks (1KB each)
-                    # This prevents UDP buffer overflow on receiver
-                    await asyncio.sleep(0.002)
-                    if i < total_chunks - 1:  # Don't sleep after the last chunk
-                        await asyncio.sleep(0.01)
+                    # B7: Single inter-chunk delay (was two separate sleeps)
+                    if i < total_chunks - 1:
+                        await asyncio.sleep(CHUNK_SEND_INTERVAL)
                 
                 logger.debug(f"Sent {total_chunks} chunks to {target_node_id}")
             

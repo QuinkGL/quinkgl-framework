@@ -195,19 +195,21 @@ class IPv8Manager:
         return None
     
     async def stop(self):
-        """Stop IPv8 gracefully."""
-        if not self.running:
-            return
-        
+        """Stop IPv8 gracefully.
+
+        B8: Idempotent — safe to call even if start() never succeeded or
+        was only partially completed.
+        """
         try:
             if self.ipv8:
                 await self.ipv8.stop()
-            
-            self.running = False
-            logger.debug("IPv8 stopped")
-            
+                self.ipv8 = None
         except Exception as e:
             logger.error(f"Error stopping IPv8: {e}")
+        finally:
+            self.running = False
+            self.community = None
+            logger.debug("IPv8 stopped")
     
     def get_stats(self) -> dict:
         """

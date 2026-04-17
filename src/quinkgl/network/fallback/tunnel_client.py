@@ -14,6 +14,13 @@ from quinkgl.network.fallback import tunnel_pb2, tunnel_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
+# B10: Reconnect parameters
+RECONNECT_INITIAL_DELAY = 1.0   # seconds
+RECONNECT_MAX_DELAY = 60.0      # seconds
+RECONNECT_BACKOFF_FACTOR = 2.0
+RECONNECT_MAX_ATTEMPTS = 10
+
+
 class TunnelClient:
     """Client for reverse tunnel NAT traversal."""
     
@@ -29,10 +36,16 @@ class TunnelClient:
         self.node_id = node_id
         self.channel = None
         self.stub = None
-        self.message_queue = asyncio.Queue()
+        # B9: Bounded queue — prevents memory leak if stream dies
+        self.message_queue = asyncio.Queue(maxsize=1024)
         self.running = False
         self.on_chat_message: Optional[Callable] = None
         self.on_peer_list: Optional[Callable] = None
+        # B9: Notified when the bidirectional stream dies
+        self.on_disconnected: Optional[Callable] = None
+        # B10: Reconnect state
+        self._reconnect_enabled = True
+        self._reconnect_task: Optional[asyncio.Task] = None
         
         # Signaling callbacks
         self.on_sdp_offer: Optional[Callable] = None
@@ -78,6 +91,15 @@ class TunnelClient:
         except Exception as e:
             logger.error(f"Tunnel stream error: {e}")
             self.running = False
+            # B9: Surface stream death to upper layers
+            if self.on_disconnected:
+                try:
+                    await self.on_disconnected()
+                except Exception as cb_err:
+                    logger.debug(f"on_disconnected callback error: {cb_err}")
+            # B10: Attempt reconnection
+            if self._reconnect_enabled:
+                self._reconnect_task = asyncio.ensure_future(self._reconnect_loop())
     
     async def _send_register(self):
         """Send registration message."""
@@ -221,9 +243,36 @@ class TunnelClient:
         )
         await self.message_queue.put(msg)
     
+    async def _reconnect_loop(self):
+        """B10: Reconnect with exponential backoff after stream failure."""
+        delay = RECONNECT_INITIAL_DELAY
+        for attempt in range(1, RECONNECT_MAX_ATTEMPTS + 1):
+            if not self._reconnect_enabled:
+                return
+            logger.info(
+                f"Tunnel reconnect attempt {attempt}/{RECONNECT_MAX_ATTEMPTS} "
+                f"in {delay:.1f}s..."
+            )
+            await asyncio.sleep(delay)
+            try:
+                # Reset queue for fresh connection
+                self.message_queue = asyncio.Queue(maxsize=1024)
+                await self.connect()
+                logger.info("Tunnel reconnected successfully")
+                return
+            except Exception as e:
+                logger.warning(f"Reconnect attempt {attempt} failed: {e}")
+            delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
+        logger.error(
+            f"Tunnel reconnect failed after {RECONNECT_MAX_ATTEMPTS} attempts — giving up"
+        )
+
     async def close(self):
         """Close tunnel connection."""
         self.running = False
+        self._reconnect_enabled = False
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
         if self.channel:
             await self.channel.close()
         logger.info("Tunnel client closed")

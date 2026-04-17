@@ -34,6 +34,8 @@ def _make_community():
     community._heartbeat_sequence = 0
     community.node_id = "local"
     community.on_model_update_callback = None
+    community._last_seen_round = {}
+    community._mid_to_node_id = {}
     return community
 
 

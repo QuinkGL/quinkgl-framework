@@ -34,6 +34,9 @@ def _make_community():
     community._nack_buckets = {}
     community.node_id = "local"
     community.data_schema_hash = "abc"
+    # mock my_peer.key for chunk signing in NACK resend path
+    community.my_peer = MagicMock()
+    community.my_peer.key.signature = MagicMock(return_value=b"\x00" * 64)
     # Bind the real method
     community._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(community)
     return community
