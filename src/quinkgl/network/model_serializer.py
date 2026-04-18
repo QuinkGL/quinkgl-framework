@@ -42,12 +42,65 @@ def _deserialize_numpy_array(data: bytes) -> np.ndarray:
     return np.load(buffer, allow_pickle=False)
 
 
+def _to_serializable(value: Any) -> Any:
+    """Recursively convert a value to a msgpack-safe structure.
+
+    S5a: numpy arrays are stored as raw bytes (no inner base64 encoding).
+    S7c: nested dicts containing numpy arrays are handled recursively, enabling
+         the sparse weight format ``{"__sparse_weight__": True, "indices": ...,
+         "values": ...}`` to round-trip through the serialization pipeline.
+    """
+    if isinstance(value, np.ndarray):
+        return {
+            "__type__": "numpy.ndarray",
+            "__data__": _serialize_numpy_array(value),  # raw bytes — no base64
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+        }
+    elif isinstance(value, dict):
+        return {str(k): _to_serializable(v) for k, v in value.items()}
+    elif isinstance(value, (int, float, str, bool, type(None))):
+        return value
+    elif isinstance(value, (list, tuple)):
+        # Attempt homogeneous numeric conversion to numpy for efficiency.
+        try:
+            arr = np.array(value)
+            if arr.dtype != object:
+                return {
+                    "__type__": "numpy.ndarray",
+                    "__data__": _serialize_numpy_array(arr),
+                    "dtype": str(arr.dtype),
+                    "shape": list(arr.shape),
+                }
+        except Exception:
+            pass
+        return [_to_serializable(v) for v in value]
+    else:
+        # Last resort: try numpy conversion, then string fallback.
+        try:
+            arr = np.array(value)
+            if arr.dtype != object:
+                return {
+                    "__type__": "numpy.ndarray",
+                    "__data__": _serialize_numpy_array(arr),
+                    "dtype": str(arr.dtype),
+                    "shape": list(arr.shape),
+                }
+        except Exception:
+            pass
+        return str(value)
+
+
 def serialize_model(weights: Any, enable_compression: bool = False) -> bytes:
     """
     Serialize model weights to bytes for transmission.
 
     Uses msgpack for structured data and numpy's native format for arrays.
     This is safe from arbitrary code execution vulnerabilities.
+
+    S5a: numpy arrays are stored as raw bytes inside msgpack (no inner base64),
+    reducing wire size by ~33% per array compared to the legacy format.
+    Outer base64 encoding is retained for transport-layer compatibility.
 
     Args:
         weights: Model weights (dict, numpy array, or list)
@@ -61,57 +114,16 @@ def serialize_model(weights: Any, enable_compression: bool = False) -> bytes:
     """
     try:
         if isinstance(weights, dict):
-            # Serialize each value appropriately
-            serializable = {}
-            for key, value in weights.items():
-                if isinstance(value, np.ndarray):
-                    # Use numpy's binary format for arrays
-                    serializable[key] = {
-                        "__type__": "numpy.ndarray",
-                        "__data__": base64.b64encode(_serialize_numpy_array(value)).decode('utf-8'),
-                        "dtype": str(value.dtype),
-                        "shape": value.shape
-                    }
-                elif isinstance(value, (int, float, str, bool, list, dict)) or value is None:
-                    serializable[key] = value
-                else:
-                    # Try to convert to numpy array
-                    try:
-                        arr = np.array(value)
-                        serializable[key] = {
-                            "__type__": "numpy.ndarray",
-                            "__data__": base64.b64encode(_serialize_numpy_array(arr)).decode('utf-8'),
-                            "dtype": str(arr.dtype),
-                            "shape": arr.shape
-                        }
-                    except Exception:
-                        serializable[key] = str(value)
-            data = msgpack.packb(serializable, use_bin_type=True)
-
+            serializable = {str(k): _to_serializable(v) for k, v in weights.items()}
         elif isinstance(weights, np.ndarray):
-            # Single numpy array - wrap in a dict structure
-            wrapped = {
-                "__type__": "numpy.ndarray",
-                "__data__": base64.b64encode(_serialize_numpy_array(weights)).decode('utf-8'),
-                "dtype": str(weights.dtype),
-                "shape": weights.shape
-            }
-            data = msgpack.packb(wrapped, use_bin_type=True)
-
+            serializable = _to_serializable(weights)
         elif isinstance(weights, (list, tuple)):
-            # Convert list/tuple to numpy array for efficiency
             arr = np.array(weights)
-            wrapped = {
-                "__type__": "numpy.ndarray",
-                "__data__": base64.b64encode(_serialize_numpy_array(arr)).decode('utf-8'),
-                "dtype": str(arr.dtype),
-                "shape": arr.shape
-            }
-            data = msgpack.packb(wrapped, use_bin_type=True)
-
+            serializable = _to_serializable(arr)
         else:
-            # Simple types - serialize directly
-            data = msgpack.packb(weights, use_bin_type=True)
+            serializable = weights
+
+        data = msgpack.packb(serializable, use_bin_type=True)
 
         # Check size before returning
         if len(data) > MAX_MODEL_SIZE_BYTES:
@@ -173,36 +185,31 @@ def deserialize_model(data: bytes) -> Any:
         # Unpack using msgpack
         unpacked = msgpack.unpackb(decoded, raw=False)
 
-        # Helper to deserialize numpy array from wrapped format
-        def deserialize_array(wrapped: dict) -> np.ndarray:
-            """Deserialize a wrapped numpy array."""
-            if wrapped.get("__type__") != "numpy.ndarray":
-                raise ValueError(f"Invalid type marker: {wrapped.get('__type__')}")
-            array_bytes = base64.b64decode(wrapped["__data__"])
-            return _deserialize_numpy_array(array_bytes)
+        def _from_serializable(value: Any) -> Any:
+            """Recursively convert msgpack-unpacked value back to numpy/Python types.
 
-        # Handle different return types
-        if isinstance(unpacked, dict):
-            # Check if this is a single wrapped array
-            if "__type__" in unpacked and unpacked["__type__"] == "numpy.ndarray":
-                return deserialize_array(unpacked)
-
-            # Otherwise, it's a dict of values
-            result = {}
-            for key, value in unpacked.items():
-                if isinstance(value, dict) and value.get("__type__") == "numpy.ndarray":
-                    result[key] = deserialize_array(value)
-                elif isinstance(value, list):
-                    # Could be a serialized array or just a list
-                    result[key] = value
+            S5a: supports both legacy (inner base64 string) and new (raw bytes) formats.
+            S7c: handles nested dicts so sparse weight representations round-trip correctly.
+            """
+            if isinstance(value, dict):
+                if value.get("__type__") == "numpy.ndarray":
+                    raw = value["__data__"]
+                    if isinstance(raw, str):
+                        # Legacy format: inner base64-encoded string.
+                        array_bytes = base64.b64decode(raw)
+                    else:
+                        # New format: raw bytes stored natively by msgpack.
+                        array_bytes = raw
+                    return _deserialize_numpy_array(array_bytes)
                 else:
-                    result[key] = value
-            return result
+                    # Generic nested dict (e.g. sparse weight representation).
+                    return {k: _from_serializable(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return value
+            else:
+                return value
 
-        elif isinstance(unpacked, list):
-            return np.array(unpacked)
-
-        return unpacked
+        return _from_serializable(unpacked)
 
     except Exception as e:
         logger.error(f"Failed to deserialize model: {e}")
