@@ -11,6 +11,9 @@ from typing import Dict, Tuple, List, Optional, Any
 from quinkgl.fingerprint.fingerprint import (
     DataFingerprint,
     FingerprintPrivacyConfig,
+    NOISE_MECHANISM_GAUSSIAN,
+    NOISE_MECHANISM_LAPLACE,
+    NOISE_MECHANISM_NONE,
 )
 
 
@@ -61,26 +64,44 @@ class FingerprintComputer:
                 result[label] = "high"
         return result
 
+    def _sample_noise(self, mechanism: str, scale: float) -> float:
+        """Sample a fresh noise value per call.
+
+        Privacy invariant: noise MUST be sampled per-query, never cached,
+        to prevent averaging-attack de-noising across repeated fingerprints.
+        """
+        if scale <= 0.0 or mechanism == NOISE_MECHANISM_NONE:
+            return 0.0
+        if mechanism == NOISE_MECHANISM_LAPLACE:
+            return float(np.random.laplace(0.0, scale))
+        # Gaussian (default)
+        return float(np.random.normal(0.0, scale))
+
     def _add_feature_noise(
         self, moments: Dict[str, Tuple[float, float]]
     ) -> Dict[str, Tuple[float, float]]:
-        sigma = self.privacy.feature_noise_sigma
+        scale = self.privacy.effective_feature_noise_scale()
+        mech = self.privacy.feature_noise_mechanism
         clip = self.privacy.feature_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
         for key, (mean, var) in moments.items():
-            m = float(np.clip(mean, -clip, clip)) + float(np.random.normal(0, sigma))
-            v = max(0.0, float(np.clip(var, -clip, clip)) + float(np.random.normal(0, sigma)))
+            m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
+            v = max(
+                0.0,
+                float(np.clip(var, -clip, clip)) + self._sample_noise(mech, scale),
+            )
             noised[key] = (m, v)
         return noised
 
     def _add_gradient_noise(
         self, moments: Dict[str, Tuple[float, float]]
     ) -> Dict[str, Tuple[float, float]]:
-        sigma = self.privacy.gradient_noise_sigma
+        scale = self.privacy.effective_gradient_noise_scale()
+        mech = self.privacy.gradient_noise_mechanism
         noised: Dict[str, Tuple[float, float]] = {}
         for key, (mean, var) in moments.items():
-            m = mean + float(np.random.normal(0, sigma))
-            v = max(0.0, var + float(np.random.normal(0, sigma)))
+            m = mean + self._sample_noise(mech, scale)
+            v = max(0.0, var + self._sample_noise(mech, scale))
             noised[key] = (float(m), float(v))
         return noised
 
