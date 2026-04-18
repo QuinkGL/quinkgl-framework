@@ -59,6 +59,7 @@ def compress_weights(
         compression_meta is needed for decompression.
     """
     meta: Dict[str, Any] = {
+        "pipeline_version": 1,
         "steps": [],
         "original_size": _estimate_weight_size(weights),
     }
@@ -75,7 +76,7 @@ def compress_weights(
     # Step 2: Error feedback — inject residual before sparsification
     pre_sparse = None
     if config.error_feedback and ef_state is not None and config.sparsification is not None:
-        pre_sparse = processed  # save for residual computation
+        pre_sparse = processed  # save uncorrected delta for residual computation
         processed = ef_state.apply(processed)
 
     # Step 3: Sparsification
@@ -86,7 +87,20 @@ def compress_weights(
 
     # Step 4: Error feedback — store new residual
     if config.error_feedback and ef_state is not None and pre_sparse is not None:
-        ef_state.update(ef_state.apply(pre_sparse), processed)
+        # S1a: pass pre_sparse (uncorrected delta), not ef_state.apply(pre_sparse),
+        # to avoid double-applying the residual and compounding corrections each round.
+        #
+        # The EF residual = corrected − compressed (both must be dense numpy arrays).
+        # After S7, `processed` may be a sparse dict; reconstruct the dense form so
+        # the residual computation in _update_array works correctly.
+        compressed_for_ef = processed
+        if isinstance(processed, dict):
+            compressed_for_ef = desparsify_weights(
+                processed,
+                meta.get("sparse_meta", {}),
+                base_weights=None,
+            )
+        ef_state.update(pre_sparse, compressed_for_ef)
         meta["steps"].append("error_feedback")
         meta["ef_residual_norm"] = ef_state.total_residual_norm
 
@@ -134,6 +148,13 @@ def decompress_weights(
     Returns:
         Reconstructed weights.
     """
+    # S9a: validate pipeline_version so corrupted or mismatched metadata is detected early.
+    version = meta.get("pipeline_version")
+    if version is not None and version != 1:
+        raise ValueError(
+            f"Unsupported compression pipeline_version={version}. Expected 1."
+        )
+
     processed_data = data
 
     # Step 1: Zlib decompression
@@ -148,15 +169,28 @@ def decompress_weights(
     # Step 3: Dequantize
     if "quantize" in meta.get("steps", []):
         quant_meta = meta.get("quant_meta")
-        if quant_meta:
-            weights = dequantize_weights(weights, quant_meta)
+        # S9b: raise instead of silently skipping when expected metadata is missing.
+        if quant_meta is None:
+            raise ValueError(
+                "decompress_weights: 'quantize' step in pipeline but quant_meta is None. "
+                "Metadata may be corrupted or truncated."
+            )
+        weights = dequantize_weights(weights, quant_meta)
 
     # Step 4: Desparsify
     if "sparsify" in meta.get("steps", []):
         sparse_meta = meta.get("sparse_meta")
-        if sparse_meta:
-            base = base_weights if not meta.get("has_delta", False) else None
-            weights = desparsify_weights(weights, sparse_meta, base)
+        # S9b: raise instead of silently skipping.
+        if sparse_meta is None:
+            raise ValueError(
+                "decompress_weights: 'sparsify' step in pipeline but sparse_meta is None. "
+                "Metadata may be corrupted or truncated."
+            )
+        # S3b: when sparsification operates on a delta, base is not needed for
+        # desparsify (zeros are correct for the delta itself). When operating on
+        # absolute weights, base is mandatory for correct reconstruction.
+        base = base_weights if not meta.get("has_delta", False) else None
+        weights = desparsify_weights(weights, sparse_meta, base)
 
     # Step 5: Apply delta
     if meta.get("has_delta", False) and base_weights is not None:
