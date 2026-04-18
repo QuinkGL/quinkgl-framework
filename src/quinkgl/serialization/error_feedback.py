@@ -134,21 +134,11 @@ class ErrorFeedbackState:
 
     @property
     def total_residual_norm(self) -> float:
-        """ℓ₂-norm of the concatenated residual buffer (global, cross-tensor)."""
+        """ℓ₂-norm of the concatenated residual buffer."""
         if not self._residuals:
             return 0.0
         norms_sq = [np.sum(r ** 2) for r in self._residuals.values()]
         return float(np.sqrt(sum(norms_sq)))
-
-    @property
-    def per_tensor_residual_norms(self) -> dict:
-        """Per-tensor ℓ₂-norms of the residual buffer.
-
-        S12: The global ``total_residual_norm`` and the per-tensor cap in
-        ``_update_array`` operate at different granularities.  Use this
-        property when you need per-tensor monitoring consistent with the cap.
-        """
-        return {k: float(np.linalg.norm(r)) for k, r in self._residuals.items()}
 
     @property
     def round_number(self) -> int:
@@ -167,8 +157,7 @@ class ErrorFeedbackState:
         residual = self._residuals.get(key)
         if residual is None:
             return delta
-        # S13: Keep result in float64 through sparsification; cast only at final serialization.
-        return delta.astype(np.float64) + residual.astype(np.float64)
+        return (delta.astype(np.float64) + residual.astype(np.float64)).astype(delta.dtype)
 
     def _update_array(
         self, key: str, corrected: np.ndarray, compressed: np.ndarray

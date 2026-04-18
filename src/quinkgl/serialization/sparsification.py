@@ -95,12 +95,7 @@ def desparsify_weights(
     Returns:
         Full reconstructed weights.
     """
-    if isinstance(sparse_weights, dict) and sparse_weights.get("__sparse_weight__"):
-        # S7b: single tensor in new sparse format (was a numpy array before sparsification).
-        base = base_weights if isinstance(base_weights, np.ndarray) else None
-        return _desparsify_array(sparse_weights, metadata, base)
-    elif isinstance(sparse_weights, dict):
-        # Dict of weight tensors — each value may be sparse dict or plain array.
+    if isinstance(sparse_weights, dict):
         result = {}
         for key, value in sparse_weights.items():
             meta = metadata.get(key)
@@ -116,7 +111,6 @@ def desparsify_weights(
                     result[key] = value
         return result
     elif isinstance(sparse_weights, np.ndarray) and metadata:
-        # Legacy dense sparse array.
         base = base_weights if isinstance(base_weights, np.ndarray) else None
         return _desparsify_array(sparse_weights, metadata, base)
     else:
@@ -149,11 +143,6 @@ def compute_delta(
                 )
             else:
                 delta[key] = current_weights[key]
-        # S6a: mark keys removed from current_weights with a None tombstone so
-        # apply_delta does not silently restore them from base_weights.
-        for key in base_weights:
-            if key not in current_weights:
-                delta[key] = None
         return delta
     else:
         return current_weights
@@ -179,20 +168,14 @@ def apply_delta(
     elif isinstance(base_weights, dict):
         result = {}
         for key in base_weights:
-            if key in delta:
-                if delta[key] is None:
-                    # S6b: tombstone — key was deleted from current_weights; skip restoration.
-                    continue
-                elif isinstance(delta[key], np.ndarray):
-                    result[key] = (
-                        base_weights[key].astype(np.float64) + delta[key].astype(np.float64)
-                    ).astype(base_weights[key].dtype)
-                else:
-                    result[key] = base_weights[key]
+            if key in delta and isinstance(delta[key], np.ndarray):
+                result[key] = (
+                    base_weights[key].astype(np.float64) + delta[key].astype(np.float64)
+                ).astype(base_weights[key].dtype)
             else:
                 result[key] = base_weights[key]
         for key in delta:
-            if key not in base_weights and delta[key] is not None:
+            if key not in base_weights:
                 result[key] = delta[key]
         return result
     else:
@@ -203,12 +186,7 @@ def _sparsify_array(
     arr: np.ndarray,
     config: SparsificationConfig,
 ) -> Tuple[Any, Dict[str, Any]]:
-    """Sparsify a single numpy array.
-
-    S7a: Returns a sparse dict ``{"__sparse_weight__": True, "indices": int32_arr,
-    "values": float_arr}`` instead of a full dense array, providing real bandwidth
-    savings proportional to ``top_k_ratio``.
-    """
+    """Sparsify a single numpy array."""
     if not np.issubdtype(arr.dtype, np.floating):
         return arr, None
 
@@ -220,86 +198,47 @@ def _sparsify_array(
 
     if config.method == "top_k":
         if k >= total:
-            return arr, {
-                "sparse": False,
-                "original_shape": list(arr.shape),
-                "original_dtype": str(arr.dtype),
-            }
+            return arr, {"sparse": False, "original_shape": list(arr.shape), "original_dtype": str(arr.dtype)}
 
         threshold_idx = np.argpartition(abs_flat, -k)[-k:]
-        threshold_idx = np.sort(threshold_idx)
+        mask = np.zeros(total, dtype=bool)
+        mask[threshold_idx] = True
 
-        # S7a: sparse representation — indices + values only, not a full dense array.
-        sparse_repr = {
-            "__sparse_weight__": True,
-            "indices": threshold_idx.astype(np.int32),
-            "values": flat[threshold_idx].astype(arr.dtype),
-        }
+        sparse_flat = np.zeros_like(flat)
+        sparse_flat[mask] = flat[mask]
+
+        sparse_arr = sparse_flat.reshape(arr.shape).astype(arr.dtype)
         meta = {
             "sparse": True,
-            "format": "indices_values",
             "top_k_ratio": config.top_k_ratio,
             "k": k,
             "total": total,
-            "non_zero_count": k,
+            "non_zero_count": int(mask.sum()),
             "original_shape": list(arr.shape),
             "original_dtype": str(arr.dtype),
         }
-        return sparse_repr, meta
+        return sparse_arr, meta
     else:
         raise ValueError(f"Unknown sparsification method: {config.method}")
 
 
 def _desparsify_array(
-    sparse_arr: Any,
+    sparse_arr: np.ndarray,
     meta: Dict[str, Any],
     base: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Desparsify a single numpy array.
-
-    Handles both the new sparse-dict format (S7b) and the legacy dense format.
-    S3a: emits a warning when base=None and sparse=True so callers are alerted
-    to lossy reconstruction (non-sparse positions will be zeroed).
-    """
+    """Desparsify a single numpy array."""
     if not meta.get("sparse", False):
         if base is not None:
             return base
         return sparse_arr
 
-    original_dtype = np.dtype(meta.get("original_dtype", meta.get("dtype", "float32")))
-    original_shape = tuple(meta.get("original_shape", meta.get("shape", [])))
-    total = meta.get("total", int(np.prod(original_shape)))
+    original_dtype = np.dtype(meta["original_dtype"])
+    original_shape = tuple(meta["original_shape"])
 
-    if isinstance(sparse_arr, dict) and sparse_arr.get("__sparse_weight__"):
-        # S7b: new sparse format — reconstruct from indices + values.
-        if base is None:
-            logger.warning(
-                "desparsify: base_weights=None with sparse=True — non-sparse positions "
-                "will be filled with zeros. This is correct only when sparsification was "
-                "applied to a delta (not absolute weights). For absolute weight "
-                "reconstruction, provide base_weights."
-            )
-        indices = sparse_arr["indices"]
-        values = sparse_arr["values"]
-
-        if base is not None:
-            result = base.flatten().astype(np.float64)
-        else:
-            result = np.zeros(total, dtype=np.float64)
-
-        result[indices] = values.astype(np.float64)
+    if base is not None:
+        result = base.astype(np.float64) + sparse_arr.astype(np.float64)
     else:
-        # Legacy dense sparse format.
-        if base is None:
-            logger.warning(
-                "desparsify: base_weights=None with sparse=True — non-sparse positions "
-                "will be filled with zeros. This is correct only when sparsification was "
-                "applied to a delta (not absolute weights). For absolute weight "
-                "reconstruction, provide base_weights."
-            )
-        if base is not None:
-            result = base.astype(np.float64) + sparse_arr.astype(np.float64)
-        else:
-            result = sparse_arr.astype(np.float64)
+        result = sparse_arr.astype(np.float64)
 
     return result.reshape(original_shape).astype(original_dtype)
