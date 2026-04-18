@@ -126,6 +126,10 @@ class LearningNode:
         # Bootstrap peers for manual peer discovery
         self._bootstrap_peers: List[str] = []
 
+        # Task 9a: track whether join() has been called so run_continuous()
+        # can auto-join when the node hasn't been explicitly joined yet.
+        self._joined: bool = False
+
         logger.debug(
             f"LearningNode initialized: peer_id={peer_id}, domain={domain}, "
             f"schema={data_schema_hash[:8]}..."
@@ -150,6 +154,7 @@ class LearningNode:
 
         # Note: Actual network connection is handled by transport layer (e.g., GossipNode)
         # This method marks the node as ready for learning
+        self._joined = True
         logger.debug(f"Node {self.peer_id} joined domain '{self.domain}'")
 
     async def leave(self):
@@ -161,28 +166,41 @@ class LearningNode:
         self.aggregator.stop()
         logger.debug(f"Node {self.peer_id} left the network")
 
-    async def run_continuous(self, data=None, data_provider: Optional[Callable] = None):
+    async def run_continuous(
+        self,
+        data=None,
+        data_provider: Optional[Callable] = None,
+        eval_data_provider: Optional[Callable] = None,
+    ):
         """
         Run continuous gossip learning.
 
         Args:
             data: Training data (single dataset)
-            data_provider: Callable that returns training data per round
+            data_provider: Callable that returns training data per round.
+            eval_data_provider: Optional callable (or dataset) for post-aggregation
+                evaluation.  When provided, the model is evaluated after each
+                aggregation and the resulting metrics are used for the checkpoint
+                broadcast (Task 6a).  Pass a small held-out validation split to
+                keep evaluation lightweight.
 
-        Either `data` or `data_provider` should be provided.
+        Either `data` or `data_provider` should be provided for training.
         If `data_provider` is given, it's called each round to get fresh data.
 
         Raises:
             RuntimeError: If run without starting the learning loop first
         """
-        if not self.is_running and not self.aggregator.running:
-            # Auto-start if not running
-            logger.debug("Auto-starting learning loop")
+        # Task 9a: auto-join if join() was never called so the documented contract
+        # (join → run_continuous) is honoured without breaking existing callers.
+        if not self._joined:
+            logger.debug(f"Node {self.peer_id}: auto-joining (join() was not called)")
+            await self.join()
 
         logger.debug(f"Starting continuous gossip learning for node {self.peer_id}")
 
         await self.aggregator.run_continuous(
-            data_provider=data_provider or data
+            data_provider=data_provider or data,
+            eval_data_provider=eval_data_provider,
         )
 
     def stop(self):
@@ -255,7 +273,9 @@ class LearningNode:
         Args:
             peer_id: Peer identifier
         """
-        asyncio.create_task(self.aggregator.remove_peer(peer_id))
+        # Task 11a: use _spawn_task instead of bare asyncio.create_task so the
+        # task is tracked and exceptions are not silently swallowed.
+        self.aggregator._spawn_task(self.aggregator.remove_peer(peer_id))
         logger.debug(f"Manually removed peer: {peer_id}")
 
     def get_peers(self) -> List[PeerInfo]:
