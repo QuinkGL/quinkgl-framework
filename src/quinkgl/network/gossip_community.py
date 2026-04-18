@@ -59,22 +59,36 @@ EARLY_NACK_AGE_THRESHOLD = 5.0  # seconds since buffer creation before probing
 MAX_FINGERPRINT_BYTES = 8192  # 8 KB
 
 
-def generate_community_id(domain: str, data_schema_hash: str) -> bytes:
+def generate_community_id(
+    domain: str,
+    data_schema_hash: str,
+    manifest_hash: Optional[str] = None,
+) -> bytes:
     """
-    Generate a unique community ID for a domain + schema combination.
+    Generate a unique community ID for a domain + schema (+ manifest) combination.
 
     This ensures domain isolation - only peers with matching
-    domain and schema can communicate.
+    domain, schema, and (optionally) swarm manifest policy can communicate.
 
     Args:
         domain: Domain identifier (e.g., "health", "agriculture")
         data_schema_hash: Hash of data schema
+        manifest_hash: Optional hex SHA-256 of the canonical swarm manifest
+            (see ``quinkgl.manifest.schema.DataPolicy.manifest_hash``).
+            When supplied, it is bound into the community ID so that peers
+            with divergent policy cannot share a community.  Omitted for
+            backwards compatibility with legacy callers.
 
     Returns:
         20-byte community ID for IPv8
     """
-    # Combine domain and schema
-    combined = f"QuinkGL-{domain}-{data_schema_hash}".encode('utf-8')
+    # Combine domain, schema, and optionally manifest hash. The manifest
+    # component is appended with a distinct separator so the absence of a
+    # manifest is never equivalent to an empty-string manifest.
+    if manifest_hash:
+        combined = f"QuinkGL-{domain}-{data_schema_hash}-m:{manifest_hash}".encode("utf-8")
+    else:
+        combined = f"QuinkGL-{domain}-{data_schema_hash}".encode("utf-8")
 
     # B16 §4.9: SHA-256 truncated to 20 bytes (replaces SHA-1)
     hashed = hashlib.sha256(combined).digest()[:20]

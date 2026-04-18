@@ -8,8 +8,15 @@ that controls Layers 1–4 of the domain-aware collaboration system.
 Section references: DOMAIN_AWARE_COLLABORATION_DESIGN.md §8.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+
+
+# Schema version for manifest canonicalization. Incremented when the
+# canonical serialization contract changes in a backwards-incompatible way.
+MANIFEST_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -185,6 +192,40 @@ class DataPolicy:
     def apply_join_policy(self) -> None:
         """Validate and apply policy when joining a swarm (§8.2 steps 2–6)."""
         self.validate()
+
+    def canonical_bytes(self) -> bytes:
+        """Deterministic serialization suitable for hashing.
+
+        Guarantees:
+          - Keys sorted recursively (``sort_keys=True``).
+          - No insignificant whitespace (fixed separators).
+          - Stable float repr via JSON's ``repr()`` formatting.
+          - Schema version prefixed so that hashes across schema versions
+            cannot collide.
+
+        Two semantically-equal policies produce identical bytes regardless
+        of how their sub-dicts were originally ordered.
+        """
+        payload = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "data_policy": self.to_dict(),
+        }
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+
+    def manifest_hash(self) -> str:
+        """SHA-256 of the canonical manifest bytes, hex-encoded.
+
+        This commitment binds every in-scope policy field to a single hash.
+        Peers that disagree on any field produce different hashes and
+        therefore different community IDs (see ``generate_community_id``).
+        """
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
 def _in_01(value: float, name: str) -> None:
