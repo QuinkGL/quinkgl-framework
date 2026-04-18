@@ -110,8 +110,6 @@ class ModelAggregator:
         self.metrics_history: List[Dict] = [] # History for plotting
         self.comm_log: List[Dict] = [] # Log of outgoing messages
         self._last_training_result = None  # Store last TrainingResult for sample_count
-        # Task 7b: track per-peer rejection counts to warn on repeated round divergence.
-        self._peer_rejection_counts: Dict[str, int] = {}
 
         # Domain-aware collaboration state (set by GossipNode)
         self._local_fingerprint: Optional[Any] = None
@@ -250,22 +248,12 @@ class ModelAggregator:
             raise ValueError(f"Unknown hook: {hook_name}")
 
     async def _execute_hooks(self, hook_name: str, *args, **kwargs):
-        """Execute all callbacks for a hook.
-
-        Task 2a: each callback is wrapped in a try/except so a single failing
-        hook cannot abort the current pipeline step.
-        """
+        """Execute all callbacks for a hook."""
         for callback in self.hooks.get(hook_name, []):
-            try:
-                if asyncio.iscoroutinefunction(callback):
-                    await callback(*args, **kwargs)
-                else:
-                    callback(*args, **kwargs)
-            except Exception as e:
-                logger.error(
-                    f"Hook '{hook_name}' raised an exception and was skipped: "
-                    f"{e.__class__.__name__}: {e}"
-                )
+            if asyncio.iscoroutinefunction(callback):
+                await callback(*args, **kwargs)
+            else:
+                callback(*args, **kwargs)
 
     def add_peer(self, peer_info: PeerInfo):
         """Add a newly discovered peer."""
@@ -346,25 +334,11 @@ class ModelAggregator:
         # Round-gate: reject updates too far from current round
         round_diff = abs(message.round_number - self.current_round)
         if round_diff > self.stale_round_tolerance:
-            # Task 7b: track rejections per peer and warn when a peer is repeatedly
-            # rejected — a sign that it may be permanently isolated.
-            count = self._peer_rejection_counts.get(message.sender_id, 0) + 1
-            self._peer_rejection_counts[message.sender_id] = count
-            if count == 1 or count % 5 == 0:
-                logger.warning(
-                    f"Peer {message.sender_id} rejected {count} time(s) due to round "
-                    f"divergence (msg_round={message.round_number}, "
-                    f"local_round={self.current_round}, "
-                    f"tolerance={self.stale_round_tolerance}). "
-                    "Peer may be permanently isolated — consider increasing "
-                    "stale_round_tolerance or investigating network partitioning."
-                )
-            else:
-                logger.debug(
-                    f"Rejecting stale/future update from {message.sender_id}: "
-                    f"msg_round={message.round_number}, local_round={self.current_round}, "
-                    f"tolerance={self.stale_round_tolerance}"
-                )
+            logger.debug(
+                f"Rejecting stale/future update from {message.sender_id}: "
+                f"msg_round={message.round_number}, local_round={self.current_round}, "
+                f"tolerance={self.stale_round_tolerance}"
+            )
             self._emit_event(
                 "model_rejected_stale",
                 {
@@ -674,9 +648,7 @@ class ModelAggregator:
                     f"Deferring aggregation: {len(self.pending_updates)} pending "
                     f"< min_peers_before_aggregate={self.min_peers_before_aggregate}"
                 )
-                # Task 12a: do NOT clear _aggregation_event here. Clearing it would
-                # force the next round to sleep the full gossip_interval even though
-                # there are queued updates waiting for more peers to arrive.
+                self._aggregation_event.clear()
                 return None
             # Drain into local batch; the shared list is now empty so new
             # updates arriving during aggregation are safely appended.
@@ -721,15 +693,7 @@ class ModelAggregator:
             )
 
             all_updates = [own_update] + batch
-
-            try:
-                aggregated = await self.aggregator.aggregate(all_updates)
-            except Exception:
-                # Task 1a+1b: re-insert the drained batch under lock so updates
-                # are not silently lost when aggregation fails.
-                async with self._pending_lock:
-                    self.pending_updates[:0] = batch
-                raise
+            aggregated = await self.aggregator.aggregate(all_updates)
 
             await self._execute_hooks("after_aggregate", aggregated)
 
@@ -752,12 +716,6 @@ class ModelAggregator:
                 self.model.set_backbone_weights(mixed)
 
             self._aggregation_event.clear()
-
-            # S11a: reset error-feedback residuals after aggregation so the buffer
-            # is not stale against the new (aggregated) weights.
-            from quinkgl.serialization.error_feedback import ErrorFeedbackState as _EFS
-            if hasattr(self.model, '_ef_state') and isinstance(self.model._ef_state, _EFS):
-                self.model._ef_state.reset()
         finally:
             self._aggregating = False
 
@@ -801,29 +759,15 @@ class ModelAggregator:
 
         return aggregated
 
-    async def run_continuous(self, data_provider=None, eval_data_provider=None):
+    async def run_continuous(self, data_provider=None):
         """
         Run the continuous gossip learning loop.
 
         Args:
-            data_provider: Callable (or dataset) for local training each round.
-            eval_data_provider: Optional callable (or dataset) for post-aggregation
-                evaluation.  When provided, the model is evaluated on this data
-                **after** aggregation and the resulting metrics are used for the
-                checkpoint broadcast instead of the pre-aggregation training metrics
-                (Task 6a).  Pass a small validation split to keep evaluation cheap.
+            data_provider: Callable that returns training data for each round
         """
         self.running = True
         logger.info("Starting continuous gossip learning loop")
-
-        # Task 3a: warn early when no training data is provided so the operator
-        # is not surprised by a node that gossips untrained weights indefinitely.
-        if data_provider is None:
-            logger.warning(
-                f"Node {self.peer_id}: run_continuous() called without data or "
-                "data_provider. Training will be skipped and untrained weights "
-                "will be gossiped each round."
-            )
 
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -833,26 +777,14 @@ class ModelAggregator:
                 round_start_time = datetime.now()
 
                 try:
-                    # Task 5a: reset _last_training_result at the top of each round
-                    # so a stale result from a previous successful round is never used
-                    # for own_sample_count when this round's training fails.
-                    self._last_training_result = None
-
-                    # Task 4a: increment AFTER all work succeeds so the counter
-                    # reflects completed rounds, not attempted ones.
-                    # NOTE: all in-round references to self.current_round use the
-                    # previous round's number; peers' round-gating tolerance handles
-                    # the 1-round offset (stale_round_tolerance ≥ 1).
                     self.current_round += 1
 
                     loss, acc, samples = 0.0, 0.0, 0
-                    trained_this_round = False
 
                     # 1. Local training
                     if data_provider:
                         train_data = data_provider() if callable(data_provider) else data_provider
                         loss, acc, samples = await self._train_local(train_data)
-                        trained_this_round = True
 
                         # Apply EMA smoothing (alpha=0.2) to reduce jitter from small batches
                         alpha = 0.2
@@ -874,12 +806,10 @@ class ModelAggregator:
                         if len(self.metrics_history) > 100:
                             self.metrics_history.pop(0)
 
-                        # Task 10a: pass raw loss/acc (not EMA-smoothed self.metrics)
-                        # so the convergence monitor's own sliding window is not
-                        # double-smoothed, which would delay early stopping.
+                        # Convergence check
                         convergence_report = self.convergence_monitor.update(
-                            loss=loss,
-                            accuracy=acc,
+                            loss=self.metrics["loss"],
+                            accuracy=self.metrics["accuracy"],
                             round_number=self.current_round,
                         )
                         if self.convergence_monitor.should_stop(convergence_report):
@@ -935,16 +865,8 @@ class ModelAggregator:
                     )
 
                     # 3. Send model to targets (with metrics)
-                    # Task 3b: skip sending when no training has ever occurred to
-                    # avoid gossiping a fully untrained model.
                     if targets:
-                        if not trained_this_round and self._last_training_result is None:
-                            logger.debug(
-                                "Skipping model send: no training has occurred this "
-                                "round and no prior training result is available."
-                            )
-                        else:
-                            await self._send_model(targets, loss=loss, accuracy=acc, samples_trained=samples)
+                        await self._send_model(targets, loss=loss, accuracy=acc, samples_trained=samples)
 
                     # 4. Topology Maintenance (e.g. Shuffle)
                     await self.topology.periodic_maintenance(context)
@@ -960,46 +882,8 @@ class ModelAggregator:
                     await self._aggregate_models()
 
                     # 7. Checkpoint & consensus
-                    # Task 6a: if an eval_data_provider is supplied, evaluate the model
-                    # on the validation set after aggregation so the checkpoint reflects
-                    # the post-aggregation model quality, not the pre-aggregation training
-                    # metrics.  Evaluation is run only on checkpoint rounds to limit cost.
-                    checkpoint_loss, checkpoint_acc = loss, acc
                     if self.consensus_tracker.should_checkpoint(self.current_round):
-                        if eval_data_provider is not None:
-                            try:
-                                eval_data = (
-                                    eval_data_provider()
-                                    if callable(eval_data_provider)
-                                    else eval_data_provider
-                                )
-                                # evaluate() is synchronous; run in executor so we don't
-                                # block the event loop during GPU/CPU-bound inference.
-                                loop = asyncio.get_running_loop()
-                                eval_metrics = await loop.run_in_executor(
-                                    None, lambda: self.model.evaluate(eval_data)
-                                )
-                                checkpoint_loss = float(eval_metrics.get("loss", loss))
-                                checkpoint_acc = float(eval_metrics.get("accuracy", acc))
-                                logger.debug(
-                                    f"Post-aggregation eval round {self.current_round}: "
-                                    f"loss={checkpoint_loss:.4f}, acc={checkpoint_acc:.4f}"
-                                )
-                                self._emit_event(
-                                    "post_aggregation_eval",
-                                    {
-                                        "node_id": self.peer_id,
-                                        "round": self.current_round,
-                                        "loss": checkpoint_loss,
-                                        "accuracy": checkpoint_acc,
-                                    },
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Post-aggregation evaluation failed, falling back to "
-                                    f"training metrics: {e.__class__.__name__}: {e}"
-                                )
-                        await self._broadcast_checkpoint(checkpoint_loss, checkpoint_acc)
+                        await self._broadcast_checkpoint(loss, acc)
                         result = self.consensus_tracker.check_consensus()
                         if result and result.reached:
                             self._emit_event(
@@ -1053,15 +937,6 @@ class ModelAggregator:
 
         finally:
             self.running = False
-            # Task 8a+8b: run one final aggregation pass so pending updates are
-            # not discarded on graceful shutdown (early-stopping, stop() call, etc.).
-            async with self._pending_lock:
-                pending_count = len(self.pending_updates)
-            if pending_count >= self.min_peers_before_aggregate:
-                try:
-                    await self._aggregate_models()
-                except Exception as e:
-                    logger.warning(f"Final aggregation on shutdown failed: {e}")
             async with self._pending_lock:
                 self.pending_updates.clear()
             await self._cancel_background_tasks()

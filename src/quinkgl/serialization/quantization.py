@@ -114,14 +114,12 @@ def _quantize_array(
         arr_max = flat.max()
 
         if arr_max == arr_min:
-            # S4a: use scale=0.0 as a sentinel for constant-value tensors so
-            # dequantization can reconstruct the constant instead of returning zeros.
             quantized = np.zeros_like(arr, dtype=np.uint8)
             meta = {
-                "scale": 0.0,
-                "zero_point": float(arr_min),
+                "scale": 1.0,
+                "zero_point": 0.0,
                 "original_dtype": str(arr.dtype),
-                "original_shape": list(arr.shape),
+                "original_shape": arr.shape,
                 "method": "linear",
                 "bits": config.bits,
             }
@@ -166,14 +164,9 @@ def _quantize_array(
             np.uint8 if config.bits <= 8 else np.uint16
         )
 
-        # S2a: encode sign as a packed bit-vector (1 bit per element) so the
-        # metadata is msgpack-safe and ~32x smaller than a float32 array.
-        # Convention: bit=1 → value was ≥ 0 (positive or zero), bit=0 → negative.
-        sign_flat = sign.flatten()
-        sign_bits = np.packbits((sign_flat >= 0).astype(np.uint8))
         meta = {
             "norm": float(norm),
-            "sign_bits": sign_bits.tobytes(),
+            "sign": sign.astype(np.float32),
             "original_dtype": str(arr.dtype),
             "original_shape": list(arr.shape),
             "method": "qsgd",
@@ -197,38 +190,18 @@ def _dequantize_array(
     if method == "linear":
         scale = meta["scale"]
         zero_point = meta["zero_point"]
-        if scale == 0.0:
-            # S4b: constant-value tensor — reconstruct to the stored constant.
-            result = np.full(original_shape, zero_point, dtype=np.float64)
-        else:
-            result = quantized.astype(np.float64) * scale + zero_point
+        result = quantized.astype(np.float64) * scale + zero_point
 
     elif method == "qsgd":
         norm = meta["norm"]
         num_levels = 2 ** meta["bits"]
-        total = int(np.prod(original_shape))
-
-        # S2b: decode sign from packed bits (new format) or fall back to legacy array.
-        sign_bits_data = meta.get("sign_bits")
-        legacy_sign = meta.get("sign")
-        if sign_bits_data is not None:
-            # New format: packed bit-vector
-            sign_bits = np.frombuffer(sign_bits_data, dtype=np.uint8)
-            sign_unpacked = np.unpackbits(sign_bits)[:total].astype(np.float64)
-            sign = np.where(sign_unpacked > 0, 1.0, -1.0)
-        elif isinstance(legacy_sign, np.ndarray):
-            sign = legacy_sign.flatten().astype(np.float64)
+        sign = meta["sign"]
+        if isinstance(sign, np.ndarray):
+            sign = sign.flatten()
         else:
-            sign = np.ones(total, dtype=np.float64)
-
+            sign = np.ones(int(np.prod(original_shape)))
         flat_q = quantized.flatten().astype(np.float64)
-        # S8a: validate that sign and quantized arrays have the same length.
-        if len(sign) != len(flat_q):
-            raise ValueError(
-                f"QSGD sign/quantized length mismatch: "
-                f"sign={len(sign)}, quantized={len(flat_q)}"
-            )
-        flat_result = flat_q / num_levels * norm * sign
+        flat_result = flat_q / num_levels * norm * sign[:len(flat_q)]
         result = flat_result
 
     else:
