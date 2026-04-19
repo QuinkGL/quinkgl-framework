@@ -119,8 +119,10 @@ class RandomTopology(TopologyStrategy):
             peer_info: Information about the peer
 
         Returns:
-            True if peer has compatible domain and schema
+            True if peer has compatible domain, schema, and manifest_id
         """
+        if context.my_manifest_id is not None and peer_info.manifest_id is not None:
+            return peer_info.manifest_id == context.my_manifest_id
         return (
             peer_info.domain == context.my_domain
             and peer_info.data_schema_hash == context.my_data_schema_hash

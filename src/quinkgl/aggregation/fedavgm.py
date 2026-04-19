@@ -30,6 +30,10 @@ class FedAvgM(AggregationStrategy):
             server_momentum: Momentum coefficient (0-1, default 0.9)
             **kwargs: Additional configuration parameters
         """
+        if not 0.0 <= server_momentum < 1.0:
+            raise ValueError(
+                f"server_momentum must be in [0, 1) — got {server_momentum}"
+            )
         super().__init__(**kwargs)
         self.server_momentum = server_momentum
         self.momentum_buffer = None
@@ -42,7 +46,7 @@ class FedAvgM(AggregationStrategy):
         Aggregate with server momentum.
 
         Momentum buffer is updated as:
-            buffer = momentum * buffer + averaged_update
+            buffer = momentum * buffer + (1 - momentum) * averaged_update
         """
         self._validate_updates(updates)
 
