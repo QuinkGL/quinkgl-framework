@@ -11,12 +11,70 @@ Section references: DOMAIN_AWARE_COLLABORATION_DESIGN.md §8.
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # Schema version for manifest canonicalization. Incremented when the
 # canonical serialization contract changes in a backwards-incompatible way.
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
+_VALID_NOISE_MECHANISMS = {"gaussian", "laplace", "none"}
+
+
+def _ensure_dict(data: Dict[str, Any], context: str) -> None:
+    if not isinstance(data, dict):
+        raise ValueError(f"{context} must be a dict, got {type(data).__name__}")
+
+
+def _check_allowed_keys(data: Dict[str, Any], allowed: set[str], context: str) -> None:
+    extra = set(data.keys()) - allowed
+    if extra:
+        raise ValueError(f"{context} contains unknown fields: {sorted(extra)}")
+
+
+def _check_required_keys(data: Dict[str, Any], required: set[str], context: str) -> None:
+    missing = required - set(data.keys())
+    if missing:
+        raise ValueError(f"{context} is missing required fields: {sorted(missing)}")
+
+
+def _require_schema_version(data: Dict[str, Any], expected: int, context: str) -> None:
+    version = data.get("schema_version")
+    if version != expected:
+        raise ValueError(
+            f"{context}.schema_version must be {expected}, got {version}"
+        )
+
+
+def _normalize_buckets(
+    buckets: Any,
+    context: str,
+) -> List[Tuple[Any, Any, Any]]:
+    if not isinstance(buckets, list):
+        raise ValueError(f"{context} must be a list, got {type(buckets).__name__}")
+    normalized: List[Tuple[Any, Any, Any]] = []
+    for entry in buckets:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            raise ValueError(f"{context} entries must be 3-item lists/tuples")
+        normalized.append((entry[0], entry[1], entry[2]))
+    return normalized
+
+
+def _validate_bucket_spec(
+    buckets: List[Tuple[Any, Any, Any]],
+    context: str,
+    numeric_type: type,
+) -> None:
+    if not buckets:
+        raise ValueError(f"{context} must not be empty")
+    for name, low, high in buckets:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{context} bucket names must be non-empty strings")
+        if not isinstance(low, numeric_type) or not isinstance(high, numeric_type):
+            raise ValueError(
+                f"{context} bucket bounds must be {numeric_type.__name__} values"
+            )
+        if low >= high:
+            raise ValueError(f"{context} bucket lower bound must be < upper bound")
 
 
 @dataclass
@@ -43,7 +101,25 @@ class CollaborationPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CollaborationPolicy":
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        strict: bool = True,
+    ) -> "CollaborationPolicy":
+        _ensure_dict(data, "CollaborationPolicy")
+        allowed = {
+            "mode",
+            "exploration_initial",
+            "exploration_decay",
+            "exploration_min",
+            "ema_alpha",
+            "edge_decay_factor",
+            "eviction_min_weight",
+            "cold_start_rounds",
+        }
+        if strict:
+            _check_allowed_keys(data, allowed, "CollaborationPolicy")
+            _check_required_keys(data, allowed, "CollaborationPolicy")
         return cls(
             mode=data.get("mode", "personalized"),
             exploration_initial=data.get("exploration_initial", 0.8),
@@ -89,7 +165,21 @@ class PersonalizationPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PersonalizationPolicy":
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        strict: bool = True,
+    ) -> "PersonalizationPolicy":
+        _ensure_dict(data, "PersonalizationPolicy")
+        allowed = {
+            "model_split",
+            "apfl_enabled",
+            "apfl_initial_alpha",
+            "fedbn_enabled",
+        }
+        if strict:
+            _check_allowed_keys(data, allowed, "PersonalizationPolicy")
+            _check_required_keys(data, allowed, "PersonalizationPolicy")
         return cls(
             model_split=data.get("model_split", "auto"),
             apfl_enabled=data.get("apfl_enabled", True),
@@ -117,7 +207,16 @@ class PrototypePolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PrototypePolicy":
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        strict: bool = True,
+    ) -> "PrototypePolicy":
+        _ensure_dict(data, "PrototypePolicy")
+        allowed = {"enabled", "alignment_weight", "fedpac_enabled"}
+        if strict:
+            _check_allowed_keys(data, allowed, "PrototypePolicy")
+            _check_required_keys(data, allowed, "PrototypePolicy")
         return cls(
             enabled=data.get("enabled", False),
             alignment_weight=data.get("alignment_weight", 0.1),
@@ -133,50 +232,178 @@ class PrototypePolicy:
 
 @dataclass
 class DataPolicy:
+    schema_version: int = MANIFEST_SCHEMA_VERSION
     fingerprint_enabled: bool = True
     min_affinity: float = 0.3
     privacy_level: str = "standard"
     label_granularity: str = "bucket"
+    label_buckets: List[Tuple[str, float, float]] = field(
+        default_factory=lambda: [
+            ("low", 0.0, 0.2),
+            ("medium", 0.2, 0.5),
+            ("high", 0.5, 1.0),
+        ]
+    )
     feature_noise_sigma: float = 0.1
+    feature_clip_norm: float = 5.0
+    feature_dp_epsilon: Optional[float] = None
+    feature_dp_delta: float = 1e-5
+    feature_sensitivity: Optional[float] = None
+    feature_noise_mechanism: str = "gaussian"
+    sample_count_buckets: List[Tuple[str, int, int]] = field(
+        default_factory=lambda: [
+            ("0-100", 0, 100),
+            ("100-1k", 100, 1000),
+            ("1k-10k", 1000, 10000),
+            ("10k-100k", 10000, 100000),
+            ("100k+", 100000, 10**9),
+        ]
+    )
     gradient_fingerprint: bool = False
+    gradient_noise_sigma: float = 0.05
+    gradient_dp_epsilon: Optional[float] = None
+    gradient_dp_delta: float = 1e-5
+    gradient_sensitivity: Optional[float] = None
+    gradient_noise_mechanism: str = "gaussian"
+    class_count_buckets: List[Tuple[str, int, int]] = field(
+        default_factory=lambda: [
+            ("sparse", 0, 2),
+            ("small", 2, 6),
+            ("medium", 6, 11),
+            ("large", 11, 10**6),
+        ]
+    )
+    min_classes_to_reveal: int = 2
+    hash_label_keys: bool = True
+    label_key_hash_length: int = 16
     collaboration: CollaborationPolicy = field(default_factory=CollaborationPolicy)
     personalization: PersonalizationPolicy = field(default_factory=PersonalizationPolicy)
     prototypes: PrototypePolicy = field(default_factory=PrototypePolicy)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "fingerprint_enabled": self.fingerprint_enabled,
             "min_affinity": self.min_affinity,
             "privacy_level": self.privacy_level,
             "label_granularity": self.label_granularity,
+            "label_buckets": [list(bucket) for bucket in self.label_buckets],
             "feature_noise_sigma": self.feature_noise_sigma,
+            "feature_clip_norm": self.feature_clip_norm,
+            "feature_dp_epsilon": self.feature_dp_epsilon,
+            "feature_dp_delta": self.feature_dp_delta,
+            "feature_sensitivity": self.feature_sensitivity,
+            "feature_noise_mechanism": self.feature_noise_mechanism,
+            "sample_count_buckets": [list(bucket) for bucket in self.sample_count_buckets],
             "gradient_fingerprint": self.gradient_fingerprint,
+            "gradient_noise_sigma": self.gradient_noise_sigma,
+            "gradient_dp_epsilon": self.gradient_dp_epsilon,
+            "gradient_dp_delta": self.gradient_dp_delta,
+            "gradient_sensitivity": self.gradient_sensitivity,
+            "gradient_noise_mechanism": self.gradient_noise_mechanism,
+            "class_count_buckets": [list(bucket) for bucket in self.class_count_buckets],
+            "min_classes_to_reveal": self.min_classes_to_reveal,
+            "hash_label_keys": self.hash_label_keys,
+            "label_key_hash_length": self.label_key_hash_length,
             "collaboration": self.collaboration.to_dict(),
             "personalization": self.personalization.to_dict(),
             "prototypes": self.prototypes.to_dict(),
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DataPolicy":
-        collab_data = data.get("collaboration", {})
-        pers_data = data.get("personalization", {})
-        proto_data = data.get("prototypes", {})
+    def from_dict(
+        cls,
+        data: Dict[str, Any],
+        strict: bool = True,
+    ) -> "DataPolicy":
+        _ensure_dict(data, "DataPolicy")
+        allowed = {
+            "schema_version",
+            "fingerprint_enabled",
+            "min_affinity",
+            "privacy_level",
+            "label_granularity",
+            "label_buckets",
+            "feature_noise_sigma",
+            "feature_clip_norm",
+            "feature_dp_epsilon",
+            "feature_dp_delta",
+            "feature_sensitivity",
+            "feature_noise_mechanism",
+            "sample_count_buckets",
+            "gradient_fingerprint",
+            "gradient_noise_sigma",
+            "gradient_dp_epsilon",
+            "gradient_dp_delta",
+            "gradient_sensitivity",
+            "gradient_noise_mechanism",
+            "class_count_buckets",
+            "min_classes_to_reveal",
+            "hash_label_keys",
+            "label_key_hash_length",
+            "collaboration",
+            "personalization",
+            "prototypes",
+        }
+        if strict:
+            _check_allowed_keys(data, allowed, "DataPolicy")
+            _check_required_keys(data, allowed, "DataPolicy")
+            _require_schema_version(data, MANIFEST_SCHEMA_VERSION, "DataPolicy")
+        schema_version = data.get("schema_version", MANIFEST_SCHEMA_VERSION)
+        collab_data = data.get("collaboration", CollaborationPolicy().to_dict())
+        pers_data = data.get("personalization", PersonalizationPolicy().to_dict())
+        proto_data = data.get("prototypes", PrototypePolicy().to_dict())
+        label_buckets = _normalize_buckets(
+            data.get("label_buckets", cls().label_buckets),
+            "DataPolicy.label_buckets",
+        )
+        sample_count_buckets = _normalize_buckets(
+            data.get("sample_count_buckets", cls().sample_count_buckets),
+            "DataPolicy.sample_count_buckets",
+        )
+        class_count_buckets = _normalize_buckets(
+            data.get("class_count_buckets", cls().class_count_buckets),
+            "DataPolicy.class_count_buckets",
+        )
         return cls(
+            schema_version=schema_version,
             fingerprint_enabled=data.get("fingerprint_enabled", True),
             min_affinity=data.get("min_affinity", 0.3),
             privacy_level=data.get("privacy_level", "standard"),
             label_granularity=data.get("label_granularity", "bucket"),
+            label_buckets=label_buckets,
             feature_noise_sigma=data.get("feature_noise_sigma", 0.1),
+            feature_clip_norm=data.get("feature_clip_norm", 5.0),
+            feature_dp_epsilon=data.get("feature_dp_epsilon"),
+            feature_dp_delta=data.get("feature_dp_delta", 1e-5),
+            feature_sensitivity=data.get("feature_sensitivity"),
+            feature_noise_mechanism=data.get("feature_noise_mechanism", "gaussian"),
+            sample_count_buckets=sample_count_buckets,
             gradient_fingerprint=data.get("gradient_fingerprint", False),
-            collaboration=CollaborationPolicy.from_dict(collab_data),
-            personalization=PersonalizationPolicy.from_dict(pers_data),
-            prototypes=PrototypePolicy.from_dict(proto_data),
+            gradient_noise_sigma=data.get("gradient_noise_sigma", 0.05),
+            gradient_dp_epsilon=data.get("gradient_dp_epsilon"),
+            gradient_dp_delta=data.get("gradient_dp_delta", 1e-5),
+            gradient_sensitivity=data.get("gradient_sensitivity"),
+            gradient_noise_mechanism=data.get("gradient_noise_mechanism", "gaussian"),
+            class_count_buckets=class_count_buckets,
+            min_classes_to_reveal=data.get("min_classes_to_reveal", 2),
+            hash_label_keys=data.get("hash_label_keys", True),
+            label_key_hash_length=data.get("label_key_hash_length", 16),
+            collaboration=CollaborationPolicy.from_dict(collab_data, strict=strict),
+            personalization=PersonalizationPolicy.from_dict(pers_data, strict=strict),
+            prototypes=PrototypePolicy.from_dict(proto_data, strict=strict),
         )
 
     def validate(self) -> None:
+        if self.schema_version != MANIFEST_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {MANIFEST_SCHEMA_VERSION}, got {self.schema_version}"
+            )
         _in_01(self.min_affinity, "min_affinity")
         if self.feature_noise_sigma < 0.0:
             raise ValueError(f"feature_noise_sigma must be >= 0, got {self.feature_noise_sigma}")
+        if self.feature_clip_norm <= 0.0:
+            raise ValueError(f"feature_clip_norm must be > 0, got {self.feature_clip_norm}")
         if self.privacy_level not in ("strict", "standard", "relaxed"):
             raise ValueError(
                 f"privacy_level must be strict|standard|relaxed, got '{self.privacy_level}'"
@@ -185,6 +412,43 @@ class DataPolicy:
             raise ValueError(
                 f"label_granularity must be exact|bucket|coarse, got '{self.label_granularity}'"
             )
+        if self.feature_noise_mechanism not in _VALID_NOISE_MECHANISMS:
+            raise ValueError(
+                f"feature_noise_mechanism must be one of {_VALID_NOISE_MECHANISMS}, got '{self.feature_noise_mechanism}'"
+            )
+        if self.gradient_noise_mechanism not in _VALID_NOISE_MECHANISMS:
+            raise ValueError(
+                f"gradient_noise_mechanism must be one of {_VALID_NOISE_MECHANISMS}, got '{self.gradient_noise_mechanism}'"
+            )
+        if self.feature_dp_epsilon is not None and self.feature_dp_epsilon <= 0.0:
+            raise ValueError(f"feature_dp_epsilon must be > 0, got {self.feature_dp_epsilon}")
+        if self.gradient_dp_epsilon is not None and self.gradient_dp_epsilon <= 0.0:
+            raise ValueError(f"gradient_dp_epsilon must be > 0, got {self.gradient_dp_epsilon}")
+        if not (0.0 < self.feature_dp_delta < 1.0):
+            raise ValueError(f"feature_dp_delta must be in (0, 1), got {self.feature_dp_delta}")
+        if not (0.0 < self.gradient_dp_delta < 1.0):
+            raise ValueError(f"gradient_dp_delta must be in (0, 1), got {self.gradient_dp_delta}")
+        if self.feature_sensitivity is not None and self.feature_sensitivity <= 0.0:
+            raise ValueError(
+                f"feature_sensitivity must be > 0, got {self.feature_sensitivity}"
+            )
+        if self.gradient_sensitivity is not None and self.gradient_sensitivity <= 0.0:
+            raise ValueError(
+                f"gradient_sensitivity must be > 0, got {self.gradient_sensitivity}"
+            )
+        if self.gradient_noise_sigma < 0.0:
+            raise ValueError(f"gradient_noise_sigma must be >= 0, got {self.gradient_noise_sigma}")
+        if self.min_classes_to_reveal < 0:
+            raise ValueError(
+                f"min_classes_to_reveal must be >= 0, got {self.min_classes_to_reveal}"
+            )
+        if self.label_key_hash_length < 1:
+            raise ValueError(
+                f"label_key_hash_length must be >= 1, got {self.label_key_hash_length}"
+            )
+        _validate_bucket_spec(self.label_buckets, "label_buckets", float)
+        _validate_bucket_spec(self.sample_count_buckets, "sample_count_buckets", int)
+        _validate_bucket_spec(self.class_count_buckets, "class_count_buckets", int)
         self.collaboration.validate()
         self.personalization.validate()
         self.prototypes.validate()
@@ -206,12 +470,8 @@ class DataPolicy:
         Two semantically-equal policies produce identical bytes regardless
         of how their sub-dicts were originally ordered.
         """
-        payload = {
-            "schema_version": MANIFEST_SCHEMA_VERSION,
-            "data_policy": self.to_dict(),
-        }
         return json.dumps(
-            payload,
+            self.to_dict(),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,

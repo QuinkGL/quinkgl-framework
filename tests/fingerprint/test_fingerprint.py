@@ -7,6 +7,7 @@ import pytest
 
 from quinkgl.fingerprint.fingerprint import (
     DataFingerprint,
+    FINGERPRINT_SCHEMA_VERSION,
     AffinityWeights,
     FingerprintPrivacyConfig,
     _BUCKET_ORDER,
@@ -102,14 +103,18 @@ class TestSampleBucketing:
 
 class TestFingerprintComputer:
     def test_compute_from_label_counts(self):
+        # Default privacy config hashes label keys and suppresses num_classes;
+        # verify buckets via hashed keys rather than raw class names.
         computer = FingerprintComputer()
         fp = computer.compute_from_label_counts(
             label_counts={"0": 50, "1": 30, "2": 20},
         )
-        assert fp.label_buckets["0"] == "high"
-        assert fp.label_buckets["1"] == "medium"
-        assert fp.label_buckets["2"] == "medium"
-        assert fp.num_classes == 3
+        assert fp.label_buckets[computer._hash_label_key("0")] == "high"
+        assert fp.label_buckets[computer._hash_label_key("1")] == "medium"
+        assert fp.label_buckets[computer._hash_label_key("2")] == "medium"
+        # Raw num_classes is suppressed when hashing is active (audit F4).
+        assert fp.num_classes == 0
+        assert fp.class_count_bucket == "small"
         assert fp.sample_bucket == "100-1k"
 
     def test_compute_with_feature_moments(self):
@@ -331,6 +336,7 @@ class TestSerialization:
         )
         d = fp.to_dict()
         fp2 = DataFingerprint.from_dict(d)
+        assert fp2.schema_version == FINGERPRINT_SCHEMA_VERSION
         assert fp2.label_buckets == fp.label_buckets
         assert fp2.noised_moments == fp.noised_moments
         assert fp2.sample_bucket == fp.sample_bucket
@@ -362,6 +368,42 @@ class TestSerialization:
         d2 = json.loads(json_str)
         fp2 = DataFingerprint.from_dict(d2)
         assert fp2.label_buckets == fp.label_buckets
+
+    def test_missing_schema_version_rejected(self):
+        fp = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+        d = fp.to_dict()
+        d.pop("schema_version")
+        with pytest.raises(ValueError, match="schema_version"):
+            DataFingerprint.from_dict(d)
+
+    def test_unknown_field_rejected(self):
+        fp = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+        d = fp.to_dict()
+        d["unexpected"] = True
+        with pytest.raises(ValueError, match="unknown fields"):
+            DataFingerprint.from_dict(d)
+
+    def test_out_of_range_bucket_rejected(self):
+        fp = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+        d = fp.to_dict()
+        d["label_buckets"] = {"a": "invalid"}
+        with pytest.raises(ValueError, match="label_buckets values"):
+            DataFingerprint.from_dict(d)
 
 
 class TestBucketHelpers:

@@ -2,6 +2,7 @@
 
 from quinkgl.fingerprint.fingerprint import (
     DataFingerprint,
+    FINGERPRINT_SCHEMA_VERSION,
     AffinityWeights,
     FingerprintPrivacyConfig,
     calibrated_noise_scale,
@@ -15,6 +16,7 @@ from quinkgl.fingerprint.computer import FingerprintComputer
 
 __all__ = [
     "DataFingerprint",
+    "FINGERPRINT_SCHEMA_VERSION",
     "AffinityWeights",
     "FingerprintPrivacyConfig",
     "FingerprintComputer",

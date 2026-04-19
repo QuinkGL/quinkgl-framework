@@ -101,6 +101,7 @@ from quinkgl.topology.spectral import SpectralAnalyzer, SpectralReport
 # =============================================================================
 from quinkgl.fingerprint import (
     DataFingerprint,
+    FINGERPRINT_SCHEMA_VERSION,
     AffinityWeights,
     FingerprintPrivacyConfig,
     FingerprintComputer,
@@ -130,6 +131,7 @@ from quinkgl.aggregation.scaffold import Scaffold
 # MANIFEST - Swarm manifest and data policy
 # =============================================================================
 from quinkgl.manifest import (
+    MANIFEST_SCHEMA_VERSION,
     DataPolicy,
     CollaborationPolicy,
     PersonalizationPolicy,
@@ -201,6 +203,7 @@ __all__ = [
     
     # Fingerprint
     "DataFingerprint",
+    "FINGERPRINT_SCHEMA_VERSION",
     "AffinityWeights",
     "FingerprintPrivacyConfig",
     "FingerprintComputer",
@@ -220,6 +223,7 @@ __all__ = [
     "AggregatedModel",
     
     # Manifest
+    "MANIFEST_SCHEMA_VERSION",
     "DataPolicy",
     "CollaborationPolicy",
     "PersonalizationPolicy",
