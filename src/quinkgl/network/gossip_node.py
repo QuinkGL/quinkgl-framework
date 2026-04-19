@@ -20,6 +20,7 @@ Automatically falls back to tunnel relay when IPv8 P2P fails.
 """
 
 import asyncio
+import hashlib
 import logging
 import time
 from typing import Optional, Any, Callable, Dict
@@ -179,7 +180,8 @@ class GossipNode:
 
         # Domain-aware collaboration
         self.data_policy = data_policy
-        self.fingerprint = fingerprint
+        self._fingerprint_source = fingerprint
+        self.fingerprint = fingerprint if not callable(fingerprint) else None
 
         # Lifecycle tracking
         self._start_time: Optional[float] = None
@@ -301,10 +303,7 @@ class GossipNode:
             # Setup callbacks
             self._setup_ipv8_callbacks()
 
-            # Wire fingerprint into community for announce + aggregator for selection
-            if self.fingerprint is not None:
-                self.community.local_fingerprint = self.fingerprint
-                self.gl_node.aggregator._local_fingerprint = self.fingerprint
+            self._configure_local_fingerprint_runtime()
 
             # Wire prototype store if data policy enables it
             if self.data_policy is not None and self.data_policy.prototypes.enabled:
@@ -517,6 +516,52 @@ class GossipNode:
                 logger.debug(f"Merged prototypes from {sender_id}")
 
         self.community.on_prototype_callback = on_prototype_received
+
+    def _configure_local_fingerprint_runtime(self) -> None:
+        aggregator = self.gl_node.aggregator
+        aggregator._local_fingerprint_update_callback = self._apply_local_fingerprint
+        source = getattr(self, "_fingerprint_source", getattr(self, "fingerprint", None))
+        if source is None:
+            aggregator._local_fingerprint_provider = None
+            aggregator._set_local_fingerprint(None)
+            return
+        aggregator._local_fingerprint_provider = self._make_local_fingerprint_provider(source)
+        aggregator._refresh_local_fingerprint()
+
+    def _make_local_fingerprint_provider(self, source: Any) -> Callable[[int], Any]:
+        from quinkgl.fingerprint.fingerprint import DataFingerprint
+
+        if callable(source):
+            def provider(round_number: int) -> Any:
+                fingerprint = source(round_number)
+                if isinstance(fingerprint, DataFingerprint) and fingerprint.round_nonce is None:
+                    return self._bind_fingerprint_to_round(fingerprint, round_number)
+                return fingerprint
+
+            return provider
+
+        def provider(round_number: int) -> Any:
+            if isinstance(source, DataFingerprint):
+                return self._bind_fingerprint_to_round(source, round_number)
+            return source
+
+        return provider
+
+    def _bind_fingerprint_to_round(self, fingerprint: Any, round_number: int) -> Any:
+        from quinkgl.fingerprint.fingerprint import DataFingerprint
+
+        if not isinstance(fingerprint, DataFingerprint):
+            return fingerprint
+        payload = fingerprint.to_dict()
+        payload["round_nonce"] = hashlib.sha256(
+            f"quinkgl-fingerprint-round:{round_number}".encode("utf-8")
+        ).hexdigest()[:16]
+        return DataFingerprint.from_dict(payload)
+
+    def _apply_local_fingerprint(self, fingerprint: Optional[Any]) -> None:
+        self.fingerprint = fingerprint
+        if self.community is not None:
+            self.community.local_fingerprint = fingerprint
 
     async def _start_tunnel_fallback(self):
         """Start tunnel relay fallback."""
@@ -736,6 +781,7 @@ class GossipNode:
                 await self._send_model_update_via_tunnel(peer_id, message)
 
         self.gl_node.aggregator.send_message_callback = send_to_peer
+        self._configure_local_fingerprint_runtime()
 
         # Sync peers before starting
         if self.connection_mode == ConnectionMode.IPV8_P2P:

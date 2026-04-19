@@ -27,11 +27,11 @@ QuinkGL draws from the gossip learning paradigm [[Ormándi et al., 2013]](#refer
 |---------|-------------|
 | **Fully Decentralized** | No central server — pure P2P gossip protocol |
 | **Non-IID Resilient** | AffinityTopology + EntropyWeightedAvg + FedProx + SCAFFOLD for heterogeneous data |
-| **Privacy-Preserving Fingerprints** | Quantized, noised data summaries for peer matching (ε-DP ready) |
+| **Privacy-Preserving Fingerprints** | Quantized, noised, schema-validated data summaries with per-round binding for peer matching |
 | **Byzantine Fault Tolerance** | Krum, MultiKrum, TrimmedMean aggregation strategies |
 | **NAT Traversal** | IPv8 with UDP hole punching + automatic tunnel fallback |
 | **Framework Agnostic** | PyTorch, TensorFlow, or custom model wrappers |
-| **Swarm Manifest** | Cryptographic commitment to training protocol (model, aggregation, topology) |
+| **Swarm Manifest** | Canonical SHA-256 commitment to training protocol and privacy policy |
 | **Personalized FL** | APFL adaptive mixing, FedRep-style backbone/head split |
 | **Staleness-Aware** | StalenessWeightedFedAvg for asynchronous environments |
 | **Variance Reduction** | SCAFFOLD with gossip-adapted control variates (Karimireddy et al., 2020) |
@@ -291,11 +291,15 @@ Each node computes a lightweight, **privacy-preserving summary** of its local da
 
 Fingerprints are exchanged during peer discovery and used by `AffinityTopology` to compute affinity scores.
 
+Fingerprint payloads are schema-versioned, strictly validated on parse, and can be refreshed with a per-round nonce during long-running gossip sessions to reduce cross-round linkability.
+
 ---
 
 ## Swarm Manifest
 
 The **Swarm Manifest** provides cryptographic commitment to the training protocol. It binds model architecture, aggregation strategy, topology rules, and data policy into a single SHA-256 hash — analogous to a BitTorrent info hash. Two peers with the same manifest ID are, by definition, running the same training protocol.
+
+Manifest serialization is canonicalized before hashing, and manifest payloads are schema-versioned and strictly validated to avoid silent field drops or incompatible policy mixes.
 
 ---
 

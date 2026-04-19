@@ -31,11 +31,13 @@ class FingerprintComputer:
         label_counts: Dict[str, int],
         feature_moments: Optional[Dict[str, Tuple[float, float]]] = None,
         gradient_moments: Optional[Dict[str, Tuple[float, float]]] = None,
+        round_number: Optional[int] = None,
     ) -> DataFingerprint:
         total_samples = sum(label_counts.values())
         total = total_samples or 1
         raw_proportions = {k: v / total for k, v in label_counts.items()}
         raw_buckets = self._quantize_labels(raw_proportions)
+        round_nonce = self._derive_round_nonce(round_number)
 
         num_classes = len(label_counts)
         class_count_bucket = self._bucket_class_count(num_classes)
@@ -47,7 +49,7 @@ class FingerprintComputer:
             label_buckets: Dict[str, str] = {}
             revealed_num_classes = 0
         else:
-            label_buckets = self._maybe_hash_label_keys(raw_buckets)
+            label_buckets = self._maybe_hash_label_keys(raw_buckets, round_nonce)
             # When hashing is active, the raw integer class count is also
             # suppressed; downstream consumers should use class_count_bucket.
             revealed_num_classes = (
@@ -71,7 +73,23 @@ class FingerprintComputer:
             num_classes=revealed_num_classes,
             gradient_moments=grad_moments,
             class_count_bucket=class_count_bucket,
+            round_nonce=round_nonce,
         )
+
+    def _derive_round_nonce(self, round_number: Optional[int]) -> Optional[str]:
+        """Derive a stable per-round nonce string.
+
+        The nonce is not intended to be secret; it exists to bind a
+        fingerprint instance to a given round so cross-round correlation is
+        harder and hash-based label keys can rotate.  Returning ``None`` for
+        legacy/no-round calls preserves backwards compatibility.
+        """
+        if round_number is None:
+            return None
+        if not isinstance(round_number, int) or round_number < 0:
+            raise ValueError(f"round_number must be a non-negative int, got {round_number}")
+        material = f"quinkgl-fingerprint-round:{round_number}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()[:16]
 
     def _bucket_class_count(self, count: int) -> str:
         for bucket_name, low, high in self.privacy.class_count_buckets:
@@ -80,16 +98,18 @@ class FingerprintComputer:
         # Count exceeds every configured bucket → fall back to the last one.
         return self.privacy.class_count_buckets[-1][0]
 
-    def _hash_label_key(self, label: str) -> str:
+    def _hash_label_key(self, label: str, round_nonce: Optional[str] = None) -> str:
         """Stable obfuscation of a raw label name.
 
         Uses HMAC-SHA256 when ``label_key_secret`` is configured, otherwise
         plain SHA-256.  The result is truncated to ``label_key_hash_length``
         hex characters.  Peers that share the same secret (or no secret)
-        produce identical hashes for identical labels, so affinity matching
-        continues to work.
+        produce identical hashes for identical labels.  When ``round_nonce``
+        is provided, it is mixed into the digest input so label keys rotate
+        across rounds and become harder to link longitudinally.
         """
-        raw = label.encode("utf-8")
+        nonce_prefix = f"{round_nonce}:" if round_nonce is not None else ""
+        raw = f"{nonce_prefix}{label}".encode("utf-8")
         if self.privacy.label_key_secret is not None:
             digest = hmac.new(
                 self.privacy.label_key_secret, raw, hashlib.sha256
@@ -99,12 +119,16 @@ class FingerprintComputer:
         length = max(1, int(self.privacy.label_key_hash_length))
         return digest[:length]
 
-    def _maybe_hash_label_keys(self, buckets: Dict[str, str]) -> Dict[str, str]:
+    def _maybe_hash_label_keys(
+        self,
+        buckets: Dict[str, str],
+        round_nonce: Optional[str] = None,
+    ) -> Dict[str, str]:
         if not self.privacy.hash_label_keys:
             return dict(buckets)
         hashed: Dict[str, str] = {}
         for label, bucket in buckets.items():
-            hashed[self._hash_label_key(label)] = bucket
+            hashed[self._hash_label_key(label, round_nonce)] = bucket
         return hashed
 
     def _quantize_labels(self, proportions: Dict[str, float]) -> Dict[str, str]:

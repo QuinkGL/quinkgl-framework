@@ -115,6 +115,8 @@ class ModelAggregator:
 
         # Domain-aware collaboration state (set by GossipNode)
         self._local_fingerprint: Optional[Any] = None
+        self._local_fingerprint_provider: Optional[Callable[[int], Any]] = None
+        self._local_fingerprint_update_callback: Optional[Callable[[Any], None]] = None
         self._local_manifest_id: Optional[bytes] = None
         self._prototype_store: Optional[Any] = None
 
@@ -801,6 +803,17 @@ class ModelAggregator:
 
         return aggregated
 
+    def _set_local_fingerprint(self, fingerprint: Optional[Any]) -> None:
+        self._local_fingerprint = fingerprint
+        if self._local_fingerprint_update_callback is not None:
+            self._local_fingerprint_update_callback(fingerprint)
+
+    def _refresh_local_fingerprint(self) -> None:
+        if self._local_fingerprint_provider is None:
+            return
+        fingerprint = self._local_fingerprint_provider(self.current_round)
+        self._set_local_fingerprint(fingerprint)
+
     async def run_continuous(self, data_provider=None, eval_data_provider=None):
         """
         Run the continuous gossip learning loop.
@@ -844,6 +857,7 @@ class ModelAggregator:
                     # previous round's number; peers' round-gating tolerance handles
                     # the 1-round offset (stale_round_tolerance ≥ 1).
                     self.current_round += 1
+                    self._refresh_local_fingerprint()
 
                     loss, acc, samples = 0.0, 0.0, 0
                     trained_this_round = False
