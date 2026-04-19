@@ -3,6 +3,7 @@
 import pytest
 
 from quinkgl.manifest.schema import (
+    MANIFEST_SCHEMA_VERSION,
     CollaborationPolicy,
     DataPolicy,
     PersonalizationPolicy,
@@ -41,7 +42,7 @@ class TestCollaborationPolicy:
 
     def test_from_dict_partial(self):
         d = {"mode": "standard"}
-        cp = CollaborationPolicy.from_dict(d)
+        cp = CollaborationPolicy.from_dict(d, strict=False)
         assert cp.mode == "standard"
         assert cp.cold_start_rounds == 3
 
@@ -147,11 +148,14 @@ class TestPrototypePolicy:
 class TestDataPolicy:
     def test_defaults(self):
         dp = DataPolicy()
+        assert dp.schema_version == MANIFEST_SCHEMA_VERSION
         assert dp.fingerprint_enabled is True
         assert dp.min_affinity == 0.3
         assert dp.privacy_level == "standard"
         assert dp.label_granularity == "bucket"
         assert dp.feature_noise_sigma == 0.1
+        assert dp.feature_noise_mechanism == "gaussian"
+        assert dp.hash_label_keys is True
         assert dp.gradient_fingerprint is False
         assert isinstance(dp.collaboration, CollaborationPolicy)
         assert isinstance(dp.personalization, PersonalizationPolicy)
@@ -163,17 +167,26 @@ class TestDataPolicy:
             min_affinity=0.5,
             privacy_level="strict",
             label_granularity="coarse",
+            feature_dp_epsilon=0.7,
             feature_noise_sigma=0.2,
+            feature_noise_mechanism="laplace",
             gradient_fingerprint=True,
+            min_classes_to_reveal=3,
+            label_key_hash_length=12,
             collaboration=CollaborationPolicy(cold_start_rounds=5),
             personalization=PersonalizationPolicy(apfl_enabled=False),
             prototypes=PrototypePolicy(enabled=True, fedpac_enabled=True),
         )
         d = dp.to_dict()
         dp2 = DataPolicy.from_dict(d)
+        assert dp2.schema_version == MANIFEST_SCHEMA_VERSION
         assert dp2.fingerprint_enabled is False
         assert dp2.min_affinity == 0.5
         assert dp2.privacy_level == "strict"
+        assert dp2.feature_dp_epsilon == 0.7
+        assert dp2.feature_noise_mechanism == "laplace"
+        assert dp2.min_classes_to_reveal == 3
+        assert dp2.label_key_hash_length == 12
         assert dp2.collaboration.cold_start_rounds == 5
         assert dp2.personalization.apfl_enabled is False
         assert dp2.prototypes.enabled is True
@@ -189,13 +202,13 @@ class TestDataPolicy:
 
     def test_from_dict_partial(self):
         d = {"fingerprint_enabled": False}
-        dp = DataPolicy.from_dict(d)
+        dp = DataPolicy.from_dict(d, strict=False)
         assert dp.fingerprint_enabled is False
         assert dp.min_affinity == 0.3
         assert isinstance(dp.collaboration, CollaborationPolicy)
 
     def test_from_dict_empty(self):
-        dp = DataPolicy.from_dict({})
+        dp = DataPolicy.from_dict({}, strict=False)
         assert dp.fingerprint_enabled is True
         assert isinstance(dp.collaboration, CollaborationPolicy)
 
@@ -220,6 +233,31 @@ class TestDataPolicy:
     def test_validate_negative_sigma(self):
         dp = DataPolicy(feature_noise_sigma=-0.1)
         with pytest.raises(ValueError, match="feature_noise_sigma"):
+            dp.validate()
+
+    def test_validate_bad_schema_version(self):
+        dp = DataPolicy(schema_version=MANIFEST_SCHEMA_VERSION + 1)
+        with pytest.raises(ValueError, match="schema_version"):
+            dp.validate()
+
+    def test_validate_bad_feature_noise_mechanism(self):
+        dp = DataPolicy(feature_noise_mechanism="invalid")
+        with pytest.raises(ValueError, match="feature_noise_mechanism"):
+            dp.validate()
+
+    def test_validate_bad_gradient_noise_mechanism(self):
+        dp = DataPolicy(gradient_noise_mechanism="invalid")
+        with pytest.raises(ValueError, match="gradient_noise_mechanism"):
+            dp.validate()
+
+    def test_validate_negative_min_classes_to_reveal(self):
+        dp = DataPolicy(min_classes_to_reveal=-1)
+        with pytest.raises(ValueError, match="min_classes_to_reveal"):
+            dp.validate()
+
+    def test_validate_zero_hash_length(self):
+        dp = DataPolicy(label_key_hash_length=0)
+        with pytest.raises(ValueError, match="label_key_hash_length"):
             dp.validate()
 
     def test_validate_cascades_to_collaboration(self):

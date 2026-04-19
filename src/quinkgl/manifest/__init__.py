@@ -1,6 +1,7 @@
 """Swarm Manifest — schema and data policy definitions."""
 
 from quinkgl.manifest.schema import (
+    MANIFEST_SCHEMA_VERSION,
     CollaborationPolicy,
     DataPolicy,
     PersonalizationPolicy,
@@ -12,4 +13,5 @@ __all__ = [
     "DataPolicy",
     "PersonalizationPolicy",
     "PrototypePolicy",
+    "MANIFEST_SCHEMA_VERSION",
 ]
