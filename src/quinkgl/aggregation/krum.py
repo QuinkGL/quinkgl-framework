@@ -44,9 +44,9 @@ class Krum(AggregationStrategy):
         self._validate_updates(updates)
 
         n = len(updates)
-        if n <= 2 * self.num_byzantines:
+        if n < 2 * self.num_byzantines + 3:
             raise ValueError(
-                f"Krum requires n > 2*f updates (n={n}, f={self.num_byzantines})"
+                f"Krum requires n >= 2f+3 updates (n={n}, f={self.num_byzantines})"
             )
 
         # Compute distances between all pairs of updates
@@ -128,9 +128,9 @@ class MultiKrum(Krum):
         self._validate_updates(updates)
 
         n = len(updates)
-        if n <= 2 * self.num_byzantines:
+        if n < 2 * self.num_byzantines + 3:
             raise ValueError(
-                f"MultiKrum requires n > 2*f updates (n={n}, f={self.num_byzantines})"
+                f"MultiKrum requires n >= 2f+3 updates (n={n}, f={self.num_byzantines})"
             )
 
         # Compute distances

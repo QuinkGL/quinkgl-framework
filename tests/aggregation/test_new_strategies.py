@@ -26,11 +26,12 @@ class TestStalenessWeightedFedAvg:
     @pytest.mark.asyncio
     async def test_aggregation_with_staleness(self):
         sw = StalenessWeightedFedAvg(staleness_coefficient=0.5)
+        sw.set_round(10)
         updates = [
             ModelUpdate(peer_id="p1", weights=np.array([2.0]), sample_count=100, round_number=5),
             ModelUpdate(peer_id="p2", weights=np.array([4.0]), sample_count=100, round_number=10),
         ]
-        result = await sw.aggregate(updates, current_round=10)
+        result = await sw.aggregate(updates)
         assert result.metadata["aggregation_method"] == "staleness_weighted_fedavg"
         assert "staleness_info" in result.metadata
 

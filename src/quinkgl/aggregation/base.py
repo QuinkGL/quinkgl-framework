@@ -158,8 +158,12 @@ class AggregationStrategy(ABC):
         if isinstance(weights, np.ndarray):
             return weights.shape
         elif isinstance(weights, dict):
-            # Return sorted tuple of keys for dict weights
-            return tuple(sorted(weights.keys()))
+            # Include per-value shapes so that same-key but different-shaped
+            # tensors are caught before aggregation raises a broadcast error.
+            return tuple(
+                (k, weights[k].shape if hasattr(weights[k], "shape") else None)
+                for k in sorted(weights.keys())
+            )
         return ()
 
     def _clip_value(self, value: float, min_val: float = 0.1, max_val: float = 10.0) -> float:

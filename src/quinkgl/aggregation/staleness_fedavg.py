@@ -49,6 +49,11 @@ class StalenessWeightedFedAvg(FedAvg):
         """
         super().__init__(weight_by=weight_by, **kwargs)
         self.staleness_coefficient = staleness_coefficient
+        self.current_round: int = 0
+
+    def set_round(self, round_number: int) -> None:
+        """Set the current training round used for staleness calculation."""
+        self.current_round = round_number
 
     def compute_staleness_weight(self, update: ModelUpdate, current_round: int) -> float:
         """
@@ -69,23 +74,23 @@ class StalenessWeightedFedAvg(FedAvg):
     async def aggregate(
         self,
         updates: List[ModelUpdate],
-        current_round: int = 0,
     ) -> AggregatedModel:
         """
         Aggregate with staleness-weighted averaging.
 
-        If current_round is not provided, uses the maximum round_number
-        from the updates as the reference round.
+        Uses ``self.current_round`` (set via ``set_round()``) as the reference
+        round.  When ``current_round`` is 0 (default), the maximum
+        ``round_number`` across the provided updates is used instead.
 
         Args:
             updates: List of model updates from peers.
-            current_round: Current training round for staleness calculation.
 
         Returns:
             AggregatedModel with staleness-weighted weights.
         """
         self._validate_updates(updates)
 
+        current_round = self.current_round
         if current_round == 0:
             current_round = max(u.round_number for u in updates) if updates else 0
 
