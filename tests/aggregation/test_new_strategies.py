@@ -5,7 +5,41 @@ import numpy as np
 
 from quinkgl.aggregation.base import ModelUpdate
 from quinkgl.aggregation.staleness_fedavg import StalenessWeightedFedAvg
+from quinkgl.aggregation.fedavgm import FedAvgM
 from quinkgl.aggregation.fedprox import FedProx
+from quinkgl.gossip.aggregator import ModelAggregator
+from quinkgl.models.base import ModelWrapper, TrainingConfig, TrainingResult
+from quinkgl.topology.base import TopologyStrategy
+
+
+class _CaptureModel(ModelWrapper):
+    def __init__(self):
+        super().__init__(model=None)
+        self.seen_config = None
+
+    def get_weights(self):
+        return {"w": np.array([1.0])}
+
+    def set_weights(self, weights):
+        pass
+
+    async def train(self, data, config=None):
+        self.seen_config = config
+        return TrainingResult(epochs_completed=1, final_loss=0.25, final_accuracy=0.75, samples_trained=8)
+
+    def evaluate(self, data, loss_fn=None):
+        return {"loss": 0.25, "accuracy": 0.75}
+
+
+class _NoopTopology(TopologyStrategy):
+    async def select_targets(self, context, count=3):
+        return []
+
+    async def accept_connection(self, peer_info, context):
+        return True
+
+    async def should_accept_connection(self, peer_info, context):
+        return True
 
 
 class TestStalenessWeightedFedAvg:
@@ -97,3 +131,83 @@ class TestFedProxModes:
         ]
         result2 = await fp.aggregate(updates2)
         assert result2.metadata["mu"] == 0.05
+
+    @pytest.mark.asyncio
+    async def test_training_time_mode_overrides_reach_model_train_via_aggregator(self):
+        fp = FedProx(mu=0.25, mode="training_time")
+        await fp.aggregate([
+            ModelUpdate(peer_id="p1", weights={"w": np.array([1.0])}, sample_count=10),
+            ModelUpdate(peer_id="p2", weights={"w": np.array([3.0])}, sample_count=10),
+        ])
+
+        model = _CaptureModel()
+        aggregator = ModelAggregator(
+            peer_id="n1",
+            domain="demo",
+            data_schema_hash="abc",
+            model=model,
+            topology=_NoopTopology(),
+            aggregator=fp,
+            training_config=TrainingConfig(epochs=3, batch_size=7, learning_rate=0.05, grad_clip_norm=1.5),
+        )
+
+        await aggregator._train_local(data=[1])
+
+        assert model.seen_config is not None
+        assert model.seen_config is not aggregator.training_config
+        assert model.seen_config.proximal_coefficient == 0.25
+        assert np.array_equal(model.seen_config.global_weights["w"], fp.global_weights["w"])
+        assert model.seen_config.learning_rate == 0.05
+        assert model.seen_config.grad_clip_norm == 1.5
+
+
+class TestFedAvgM:
+    @pytest.mark.asyncio
+    async def test_first_round_matches_plain_average(self):
+        agg = FedAvgM(server_momentum=0.9)
+        updates = [
+            ModelUpdate(peer_id="p1", weights=np.array([1.0]), sample_count=10),
+            ModelUpdate(peer_id="p2", weights=np.array([3.0]), sample_count=10),
+        ]
+
+        result = await agg.aggregate(updates)
+
+        assert np.allclose(result.weights, np.array([2.0]))
+        assert np.allclose(agg.momentum_buffer, np.array([0.0]))
+
+    @pytest.mark.asyncio
+    async def test_subsequent_rounds_apply_server_momentum_to_deltas(self):
+        agg = FedAvgM(server_momentum=0.5)
+
+        await agg.aggregate([
+            ModelUpdate(peer_id="p1", weights=np.array([1.0]), sample_count=10),
+            ModelUpdate(peer_id="p2", weights=np.array([3.0]), sample_count=10),
+        ])
+        result2 = await agg.aggregate([
+            ModelUpdate(peer_id="p1", weights=np.array([5.0]), sample_count=10),
+            ModelUpdate(peer_id="p2", weights=np.array([7.0]), sample_count=10),
+        ])
+        result3 = await agg.aggregate([
+            ModelUpdate(peer_id="p1", weights=np.array([5.0]), sample_count=10),
+            ModelUpdate(peer_id="p2", weights=np.array([7.0]), sample_count=10),
+        ])
+
+        assert np.allclose(result2.weights, np.array([6.0]))
+        assert np.allclose(result3.weights, np.array([8.0]))
+        assert np.allclose(agg.momentum_buffer, np.array([-2.0]))
+
+    @pytest.mark.asyncio
+    async def test_dict_weights_follow_server_momentum_update(self):
+        agg = FedAvgM(server_momentum=0.5)
+
+        await agg.aggregate([
+            ModelUpdate(peer_id="p1", weights={"w": np.array([1.0])}, sample_count=10),
+            ModelUpdate(peer_id="p2", weights={"w": np.array([3.0])}, sample_count=10),
+        ])
+        result = await agg.aggregate([
+            ModelUpdate(peer_id="p1", weights={"w": np.array([5.0])}, sample_count=10),
+            ModelUpdate(peer_id="p2", weights={"w": np.array([7.0])}, sample_count=10),
+        ])
+
+        assert np.allclose(result.weights["w"], np.array([6.0]))
+        assert np.allclose(agg.global_weights["w"], np.array([6.0]))

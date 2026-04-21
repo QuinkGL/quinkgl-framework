@@ -213,3 +213,41 @@ async def test_event_drop_warning_throttled():
     # Unblock
     blocker.set()
     await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_emit_event_reports_telemetry_events_dropped_after_backlog_drains():
+    agg = _make_aggregator()
+    agg._MAX_PENDING_EVENTS = 2
+
+    blocker = asyncio.Event()
+    seen = []
+
+    async def _blocked_deliver(event_type, payload):
+        await blocker.wait()
+        agg.event_emitter.emit(event_type, payload)
+
+    agg._deliver_event = _blocked_deliver
+    agg.event_emitter = EventEmitter()
+    agg.event_emitter.subscribe(lambda event: seen.append((event.event_type, dict(event.payload))))
+
+    agg._emit_event("e1", {"i": 1})
+    agg._emit_event("e2", {"i": 2})
+    await asyncio.sleep(0)
+
+    agg._emit_event("dropped-1", {"i": 3})
+    agg._emit_event("dropped-2", {"i": 4})
+    assert agg._event_drop_count == 2
+
+    blocker.set()
+    await asyncio.sleep(0.05)
+
+    agg._emit_event("recovered", {"i": 5})
+    await asyncio.sleep(0.05)
+
+    dropped_events = [payload for event_type, payload in seen if event_type == "telemetry.events_dropped"]
+    assert len(dropped_events) == 1
+    assert dropped_events[0]["count"] == 2
+    assert dropped_events[0]["max_pending_events"] == 2
+    assert dropped_events[0]["node_id"] == "n1"
+    assert agg._event_drop_count == 0

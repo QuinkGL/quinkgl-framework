@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from quinkgl.telemetry.store import TelemetryStore
 
 
@@ -351,3 +353,100 @@ def test_store_accumulates_unique_received_peers_per_round():
     round_summary = store.get_node_rounds("node-a")[0]
 
     assert round_summary["received_peer_ids"] == ["node-b", "node-c"]
+
+
+def test_store_caps_node_count_and_prunes_oldest_node_state():
+    store = TelemetryStore(session_id="session-1", max_nodes=2)
+
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "timestamp": "2026-04-08T08:00:00",
+    })
+    store.ingest_event("training_completed", {
+        "node_id": "node-a",
+        "round": 1,
+        "loss": 0.1,
+        "accuracy": 0.9,
+        "samples_trained": 8,
+    }, timestamp=datetime.fromisoformat("2026-04-08T08:10:00"))
+    store.ingest_heartbeat({
+        "node_id": "node-b",
+        "domain": "demo",
+        "running": True,
+        "timestamp": "2026-04-08T09:00:00",
+    })
+    store.ingest_event("peer_discovered", {
+        "node_id": "node-a",
+        "peer_id": "node-b",
+        "round": 1,
+    }, timestamp=datetime.fromisoformat("2026-04-08T08:30:00"))
+    store.ingest_heartbeat({
+        "node_id": "node-c",
+        "domain": "demo",
+        "running": True,
+        "timestamp": "2026-04-08T10:00:00",
+    })
+
+    node_ids = [node["node_id"] for node in store.get_nodes()]
+    graph = store.get_network_graph()
+
+    assert node_ids == ["node-b", "node-c"]
+    assert store.get_node("node-a") is None
+    assert store.get_node_events("node-a") == []
+    assert store.get_node_rounds("node-a") == []
+    assert graph["edges"] == []
+
+
+def test_store_caps_rounds_per_node_to_most_recent_rounds():
+    store = TelemetryStore(session_id="session-1", max_rounds_per_node=2)
+    store.ingest_heartbeat({"node_id": "node-a", "domain": "demo", "running": True})
+
+    for round_number in (1, 2, 3):
+        store.ingest_event("training_completed", {
+            "node_id": "node-a",
+            "round": round_number,
+            "loss": 0.1 * round_number,
+            "accuracy": 0.5,
+            "samples_trained": 8,
+        })
+
+    rounds = store.get_node_rounds("node-a")
+
+    assert [item["round_number"] for item in rounds] == [2, 3]
+
+
+def test_store_caps_edge_count_to_most_recent_edges():
+    store = TelemetryStore(session_id="session-1", max_edges=2)
+    store.ingest_heartbeat({"node_id": "node-a", "domain": "demo", "running": True})
+
+    for peer_id in ("node-b", "node-c", "node-d"):
+        store.ingest_event("peer_discovered", {
+            "node_id": "node-a",
+            "peer_id": peer_id,
+            "round": 1,
+        })
+
+    edges = store.get_network_graph()["edges"]
+    edge_ids = sorted(edge["id"] for edge in edges)
+
+    assert edge_ids == [
+        "node-a::node-c::peer_link",
+        "node-a::node-d::peer_link",
+    ]
+
+
+def test_store_caps_peer_id_lists_to_latest_entries():
+    store = TelemetryStore(session_id="session-1", max_peer_ids_per_node=2)
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "known_peers": ["node-b", "node-c", "node-d"],
+    })
+
+    node = store.get_node("node-a")
+
+    assert node["peer_ids"] == ["node-c", "node-d"]
+    assert node["known_peer_count"] == 2

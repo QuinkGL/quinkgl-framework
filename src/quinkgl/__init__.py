@@ -39,7 +39,13 @@ Example:
     await node.run_continuous(training_data)
 """
 
-__version__ = "0.2.8"
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import version as _package_version
+
+try:
+    __version__ = _package_version("quinkgl")
+except _PackageNotFoundError:
+    __version__ = "0.3.1"
 
 # =============================================================================
 # LOGGING — honour QUINKGL_LOG_LEVEL env-var (mirrors Flower's FLWR_LOG_LEVEL)
@@ -58,7 +64,21 @@ _logging.getLogger("httpcore").setLevel(_logging.WARNING)
 # =============================================================================
 # CORE - Main node classes
 # =============================================================================
-from quinkgl.core.learning_node import LearningNode, GLNode
+from quinkgl.core.learning_node import LearningNode
+
+# Backward compatibility alias with deprecation warning
+class GLNode(LearningNode):
+    """Deprecated alias for LearningNode. Use LearningNode instead."""
+    def __init__(self, *args, **kwargs):
+        import warnings
+        warnings.warn(
+            "GLNode is deprecated and will be removed in a future version. "
+            "Use LearningNode instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        super().__init__(*args, **kwargs)
+
 from quinkgl.network.gossip_node import GossipNode
 
 # =============================================================================
@@ -81,7 +101,6 @@ try:
     _tensorflow_available = True
 except ImportError:
     _tensorflow_available = False
-    TensorFlowModel = None  # type: ignore
 
 # =============================================================================
 # TOPOLOGY - Peer selection strategies
@@ -155,19 +174,8 @@ from quinkgl.telemetry import TelemetryClient
 # =============================================================================
 # Data loading utilities are in scripts/run_gossip_node.py for full functionality
 # or use torchvision directly for CIFAR-10
-try:
-    from quinkgl.data import (
-        DatasetLoader,
-        FederatedDataSplitter,
-        DatasetInfo
-    )
-    _data_available = True
-except (ImportError, ModuleNotFoundError):
-    # Data module not available in pip package
-    DatasetLoader = None  # type: ignore
-    FederatedDataSplitter = None  # type: ignore
-    DatasetInfo = None  # type: ignore
-    _data_available = False
+# NOTE: quinkgl.data module is not included in the package; remove these exports
+_data_available = False
 
 
 # =============================================================================
@@ -189,7 +197,6 @@ __all__ = [
     "APFLMixin",
     "PyTorchModel",
     "PyTorchPersonalizedModel",
-    "TensorFlowModel",
     
     # Topology
     "TopologyStrategy",
@@ -238,9 +245,14 @@ __all__ = [
     "TerminalObserver",
     "format_runtime_event",
     "TelemetryClient",
-    
-    # Data
-    "DatasetLoader",
-    "FederatedDataSplitter",
-    "DatasetInfo",
+
+    # Feature flags
+    "_tensorflow_available",
+    "_data_available",
 ]
+
+if _tensorflow_available:
+    __all__.append("TensorFlowModel")
+
+# NOTE: _data_available is False (data module not included in package)
+# No data exports are added to __all__

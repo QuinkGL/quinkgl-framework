@@ -7,6 +7,7 @@ Connects to tunnel server via reverse tunnel and relays weight updates.
 import asyncio
 import logging
 import time
+from types import SimpleNamespace
 from typing import Optional, Callable
 
 import grpc
@@ -125,7 +126,12 @@ class TunnelClient:
             chat_msg.ParseFromString(msg.payload)
             
             if self.on_chat_message:
-                await self.on_chat_message(chat_msg)
+                await self.on_chat_message(SimpleNamespace(
+                    sender_id=chat_msg.sender_id,
+                    text=chat_msg.text,
+                    timestamp=chat_msg.timestamp,
+                    _tunnel_sender_id=msg.node_id,
+                ))
         
         elif msg.type == tunnel_pb2.PEER_LIST:
             # Parse peer list

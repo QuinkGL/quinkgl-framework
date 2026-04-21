@@ -13,6 +13,7 @@ For backward compatibility, a `mode` parameter allows using the
 legacy post-hoc approach ("weight_interpolation").
 """
 
+import warnings
 from copy import deepcopy
 from typing import List
 
@@ -51,6 +52,13 @@ class FedProx(FedAvg):
         super().__init__(**kwargs)
         self.mu = mu
         self.mode = mode
+        if mode == "weight_interpolation":
+            warnings.warn(
+                'FedProx mode="weight_interpolation" is deprecated and will be removed '
+                "in a future release. Use mode='training_time' (default) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.global_weights = None
 
     async def aggregate(

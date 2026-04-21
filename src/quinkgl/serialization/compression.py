@@ -157,10 +157,13 @@ def decompress_weights(
 
     processed_data = data
 
-    # Step 1: Zlib decompression
+    # Step 1: Zlib decompression with decompression bomb guard
     if "zlib" in meta.get("steps", []):
         import zlib
-        processed_data = zlib.decompress(processed_data)
+        # S-07: Add max_length to prevent decompression bomb attacks
+        # Limit expansion to 100x the compressed size (configurable)
+        max_expansion = len(processed_data) * 100
+        processed_data = zlib.decompress(processed_data, max_length=max_expansion)
 
     # Step 2: Deserialize
     from quinkgl.network.model_serializer import deserialize_model

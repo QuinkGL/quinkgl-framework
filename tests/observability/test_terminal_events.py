@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 
 import numpy as np
@@ -69,6 +70,8 @@ def test_event_emitter_returns_runtime_event_with_isolated_payload_snapshot():
         event.payload["metrics"]["loss"] = 0.99
         event.payload["tags"].append("beta")
 
+    subscriber.needs_isolated_payload = True
+
     def later_subscriber(event: RuntimeEvent):
         seen.append(
             (
@@ -116,6 +119,32 @@ def test_event_emitter_isolates_subscriber_exceptions():
     assert seen == [("training_completed", 3)]
 
 
+def test_event_emitter_logs_subscriber_failures_and_emits_subscriber_error(caplog):
+    seen = []
+    emitter = EventEmitter()
+
+    def raising_subscriber(event: RuntimeEvent):
+        if event.event_type == "training_completed":
+            raise RuntimeError("subscriber failure")
+
+    def healthy_subscriber(event: RuntimeEvent):
+        seen.append((event.event_type, dict(event.payload)))
+
+    emitter.subscribe(raising_subscriber)
+    emitter.subscribe(healthy_subscriber)
+
+    with caplog.at_level(logging.ERROR, logger="quinkgl.observability.events"):
+        emitter.emit("training_completed", {"round": 3})
+
+    assert ("training_completed", {"round": 3}) in seen
+    subscriber_error_events = [payload for event_type, payload in seen if event_type == "subscriber.error"]
+    assert len(subscriber_error_events) == 1
+    assert subscriber_error_events[0]["source_event_type"] == "training_completed"
+    assert subscriber_error_events[0]["error_type"] == "RuntimeError"
+    assert subscriber_error_events[0]["error"] == "subscriber failure"
+    assert "Event subscriber failed while handling training_completed" in caplog.text
+
+
 def test_event_emitter_preserves_returned_payload_shape():
     payload = {"round": 3, "metrics": {"loss": 0.25}, "tags": ["alpha"]}
     emitter = EventEmitter()
@@ -135,6 +164,8 @@ def test_subscriber_payload_mutation_does_not_affect_later_subscribers_or_return
     def mutating_subscriber(event: RuntimeEvent):
         event.payload["metrics"]["loss"] = 0.99
         event.payload["tags"].append("beta")
+
+    mutating_subscriber.needs_isolated_payload = True
 
     def later_subscriber(event: RuntimeEvent):
         seen.append(
@@ -345,6 +376,62 @@ async def test_aggregator_emits_peer_discovery_and_disconnect_events():
     assert event_types == ["peer_discovered", "peer_disconnected"]
     assert seen[0][1]["peer_id"] == "peer-a"
     assert seen[1][1]["node_id"] == "n1"
+
+
+@pytest.mark.asyncio
+async def test_aggregator_emits_aggregation_failed_event_and_restores_batch():
+    emitter = EventEmitter()
+    seen = []
+
+    def subscriber(event: RuntimeEvent):
+        seen.append((event.event_type, dict(event.payload)))
+
+    emitter.subscribe(subscriber)
+
+    class FailingAggregator(DummyAggregator):
+        async def aggregate(self, updates):
+            raise RuntimeError("aggregate boom")
+
+    aggregator = ModelAggregator(
+        peer_id="n1",
+        domain="demo",
+        data_schema_hash="abc",
+        model=DummyModel(),
+        topology=DummyTopology(),
+        aggregator=FailingAggregator(),
+        training_config=TrainingConfig(),
+    )
+    aggregator.event_emitter = emitter
+    aggregator.current_round = 7
+    aggregator.running = True
+
+    await aggregator._handle_model_update(
+        ModelUpdateMessage.create(
+            sender_id="peer-b",
+            weights={"w": np.array([2.0, 3.0])},
+            sample_count=4,
+            loss=0.5,
+            accuracy=0.6,
+            round_number=7,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="aggregate boom"):
+        await aggregator._aggregate_models()
+
+    await asyncio.sleep(0)
+
+    failed_events = [payload for event_type, payload in seen if event_type == "aggregation_failed"]
+    assert len(failed_events) == 1
+    failed = failed_events[0]
+    assert failed["node_id"] == "n1"
+    assert failed["round"] == 7
+    assert failed["pending_updates_restored"] == 1
+    assert failed["error_type"] == "RuntimeError"
+    assert failed["error"] == "aggregate boom"
+    assert failed["peer_ids"] == ["n1", "peer-b"]
+    assert len(aggregator.pending_updates) == 1
+    assert aggregator.pending_updates[0].peer_id == "peer-b"
 
 
 def test_gossip_node_can_attach_terminal_observer_and_receive_emitted_events():

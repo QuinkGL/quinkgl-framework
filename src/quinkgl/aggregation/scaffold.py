@@ -142,6 +142,7 @@ class Scaffold(AggregationStrategy):
         global_weights: Any,
         local_gradient: Optional[Any] = None,
         num_local_steps: int = 1,
+        local_control_variate: Optional[Any] = None,
     ) -> Any:
         """Compute the updated local control variate after local training.
 
@@ -181,22 +182,42 @@ class Scaffold(AggregationStrategy):
             for key in local_weights:
                 lw = local_weights[key].astype(np.float64)
                 gw = global_weights[key].astype(np.float64) if key in global_weights else lw
-
-                # Option II: c_i = (w_global - w_local) / (K * eta)
                 diff = (gw - lw) / (num_local_steps * self.learning_rate)
 
+                if local_control_variate is not None and key in local_control_variate:
+                    c_local = local_control_variate[key].astype(np.float64)
+                else:
+                    c_local = np.zeros_like(diff, dtype=np.float64)
+
                 if c_global is not None and key in c_global:
-                    # c_i^new = c_i_old - c_global + diff
-                    # For simplicity, when no previous c_i, start from diff
-                    diff = diff  # In first round, c_i_old = 0, c_global = 0 → just diff
-                cv[key] = diff.astype(local_weights[key].dtype)
+                    c_ref = c_global[key].astype(np.float64)
+                else:
+                    c_ref = np.zeros_like(diff, dtype=np.float64)
+
+                cv[key] = (c_local - c_ref + diff).astype(local_weights[key].dtype)
             return cv
         elif isinstance(local_weights, np.ndarray):
             lw = local_weights.astype(np.float64)
             gw = global_weights.astype(np.float64)
-            return ((gw - lw) / (num_local_steps * self.learning_rate)).astype(
-                local_weights.dtype
-            )
+            diff = (gw - lw) / (num_local_steps * self.learning_rate)
+
+            if local_control_variate is not None:
+                if isinstance(local_control_variate, dict):
+                    c_local = np.asarray(local_control_variate.get("__single__", 0.0), dtype=np.float64)
+                else:
+                    c_local = np.asarray(local_control_variate, dtype=np.float64)
+            else:
+                c_local = np.zeros_like(diff, dtype=np.float64)
+
+            if c_global is not None:
+                if isinstance(c_global, dict):
+                    c_ref = np.asarray(c_global.get("__single__", 0.0), dtype=np.float64)
+                else:
+                    c_ref = np.asarray(c_global, dtype=np.float64)
+            else:
+                c_ref = np.zeros_like(diff, dtype=np.float64)
+
+            return (c_local - c_ref + diff).astype(local_weights.dtype)
         return None
 
     @property
@@ -207,6 +228,31 @@ class Scaffold(AggregationStrategy):
     @property
     def round_number(self) -> int:
         return self._round
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence."""
+        state: Dict[str, Any] = {
+            "config": dict(self.config),
+            "round": self._round,
+        }
+        if self._c_global is not None:
+            state["c_global"] = {
+                k: v.tolist() for k, v in self._c_global.items()
+            }
+        return state
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot."""
+        self.config = dict(state.get("config", {}))
+        self._round = int(state.get("round", 0))
+        c_global_raw = state.get("c_global")
+        if c_global_raw is not None:
+            self._c_global = {
+                k: np.array(v, dtype=np.float64)
+                for k, v in c_global_raw.items()
+            }
+        else:
+            self._c_global = None
 
     # ------------------------------------------------------------------
     # Internal

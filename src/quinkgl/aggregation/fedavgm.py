@@ -3,7 +3,7 @@ FedAvgM aggregation strategy.
 """
 
 from copy import deepcopy
-from typing import List
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -33,6 +33,7 @@ class FedAvgM(AggregationStrategy):
         super().__init__(**kwargs)
         self.server_momentum = server_momentum
         self.momentum_buffer = None
+        self.global_weights = None
 
     async def aggregate(
         self,
@@ -65,42 +66,143 @@ class FedAvgM(AggregationStrategy):
             return await fedavg.aggregate(updates)
 
         # Apply momentum
-        if self.momentum_buffer is None:
-            # First round: no momentum
-            self.momentum_buffer = deepcopy(averaged)
+        if self.global_weights is None:
+            self.global_weights = deepcopy(averaged)
+            self.momentum_buffer = self._zeros_like(averaged)
         else:
-            # Apply momentum: buffer = momentum * buffer + (1-momentum) * averaged
+            delta = self._compute_delta(self.global_weights, averaged)
             self.momentum_buffer = self._apply_momentum(
-                self.momentum_buffer, averaged
+                self.momentum_buffer, delta
+            )
+            self.global_weights = self._apply_server_update(
+                self.global_weights,
+                self.momentum_buffer,
             )
 
         return AggregatedModel(
-            weights=deepcopy(self.momentum_buffer),
+            weights=deepcopy(self.global_weights),
             contributing_peers=[u.peer_id for u in updates],
             total_samples=sum(u.sample_count for u in updates),
             metadata={"aggregation_method": "fedavgm", "momentum": self.server_momentum},
             updates=updates
         )
 
-    def _apply_momentum(self, buffer, new_weights):
+    def _zeros_like(self, weights):
+        if isinstance(weights, np.ndarray):
+            return np.zeros_like(weights)
+        elif isinstance(weights, dict):
+            result = {}
+            for key, value in weights.items():
+                if hasattr(value, '__array__'):
+                    result[key] = np.zeros_like(value)
+                else:
+                    result[key] = value
+            return result
+        else:
+            return 0.0
+
+    def _compute_delta(self, previous_global, averaged):
+        if isinstance(previous_global, np.ndarray):
+            return (previous_global.astype(np.float64) - averaged.astype(np.float64)).astype(previous_global.dtype)
+        elif isinstance(previous_global, dict):
+            result = {}
+            for key, value in previous_global.items():
+                if key in averaged and hasattr(value, '__array__'):
+                    result[key] = (
+                        value.astype(np.float64) - averaged[key].astype(np.float64)
+                    ).astype(value.dtype)
+                else:
+                    result[key] = value
+            return result
+        else:
+            return previous_global
+
+    def _apply_momentum(self, buffer, delta):
         """Apply momentum to the update."""
         if isinstance(buffer, np.ndarray):
             return (
-                self.server_momentum * buffer + (1 - self.server_momentum) * new_weights
+                self.server_momentum * buffer + delta
             ).astype(buffer.dtype)
         elif isinstance(buffer, dict):
             result = {}
             for key in buffer:
-                if key in new_weights and hasattr(buffer[key], '__array__'):
+                if key in delta and hasattr(buffer[key], '__array__'):
                     result[key] = (
                         self.server_momentum * buffer[key] +
-                        (1 - self.server_momentum) * new_weights[key]
+                        delta[key]
                     ).astype(buffer[key].dtype)
                 else:
                     result[key] = buffer[key]
             return result
         else:
             return buffer
+
+    def _apply_server_update(self, previous_global, momentum_buffer):
+        if isinstance(previous_global, np.ndarray):
+            return (
+                previous_global.astype(np.float64) - momentum_buffer.astype(np.float64)
+            ).astype(previous_global.dtype)
+        elif isinstance(previous_global, dict):
+            result = {}
+            for key, value in previous_global.items():
+                if key in momentum_buffer and hasattr(value, '__array__'):
+                    result[key] = (
+                        value.astype(np.float64) - momentum_buffer[key].astype(np.float64)
+                    ).astype(value.dtype)
+                else:
+                    result[key] = value
+            return result
+        else:
+            return previous_global
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence."""
+        state: Dict[str, Any] = {
+            "config": dict(self.config),
+            "server_momentum": self.server_momentum,
+        }
+        if self.global_weights is not None:
+            if isinstance(self.global_weights, np.ndarray):
+                state["global_weights"] = self.global_weights.tolist()
+            elif isinstance(self.global_weights, dict):
+                state["global_weights"] = {
+                    k: v.tolist() for k, v in self.global_weights.items()
+                }
+        if self.momentum_buffer is not None:
+            if isinstance(self.momentum_buffer, np.ndarray):
+                state["momentum_buffer"] = self.momentum_buffer.tolist()
+            elif isinstance(self.momentum_buffer, dict):
+                state["momentum_buffer"] = {
+                    k: v.tolist() for k, v in self.momentum_buffer.items()
+                }
+        return state
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot."""
+        self.config = dict(state.get("config", {}))
+        self.server_momentum = float(state.get("server_momentum", self.server_momentum))
+        gw_raw = state.get("global_weights")
+        if gw_raw is not None:
+            if isinstance(gw_raw, dict):
+                self.global_weights = {
+                    k: np.array(v, dtype=np.float64)
+                    for k, v in gw_raw.items()
+                }
+            else:
+                self.global_weights = np.array(gw_raw, dtype=np.float64)
+        else:
+            self.global_weights = None
+        mb_raw = state.get("momentum_buffer")
+        if mb_raw is not None:
+            if isinstance(mb_raw, dict):
+                self.momentum_buffer = {
+                    k: np.array(v, dtype=np.float64)
+                    for k, v in mb_raw.items()
+                }
+            else:
+                self.momentum_buffer = np.array(mb_raw, dtype=np.float64)
+        else:
+            self.momentum_buffer = None
 
     def _average_numpy(self, updates: List[ModelUpdate], weights_list: List[float], total_weight: float):
         """Average numpy array weights."""

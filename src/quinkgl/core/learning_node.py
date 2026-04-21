@@ -120,7 +120,8 @@ class LearningNode:
             aggregator=aggregation,
             gossip_interval=gossip_interval,
             training_config=training_config,
-            min_peers_before_aggregate=min_peers_before_aggregate
+            min_peers_before_aggregate=min_peers_before_aggregate,
+            model_store=self.model_store,
         )
 
         # Bootstrap peers for manual peer discovery
@@ -163,7 +164,7 @@ class LearningNode:
             logger.warning("Node is not active")
             return
 
-        self.aggregator.stop()
+        await self.aggregator.stop()
         logger.debug(f"Node {self.peer_id} left the network")
 
     async def run_continuous(
@@ -203,28 +204,28 @@ class LearningNode:
             eval_data_provider=eval_data_provider,
         )
 
-    def stop(self):
-        """Stop the gossip learning loop."""
-        self.aggregator.stop()
+    async def stop(self):
+        """Stop the gossip learning loop and await graceful shutdown."""
+        await self.aggregator.stop()
 
     def register_hook(self, hook_name: str, callback: Callable):
         """
         Register a lifecycle hook.
 
         Args:
-            hook_name: Name of the hook ("before_train", "after_train", etc.)
+            hook_name: Name of the hook
             callback: Async or sync function to call
 
         Available hooks:
             - before_train: Called before local training
-            - after_train: Called after local training (receives TrainingResult)
-            - before_send: Called before sending model (receives weights)
+            - after_train: Called after local training
+            - before_send: Called before sending model
             - after_receive: Called after receiving model update
-            - before_aggregate: Called before aggregation (receives pending updates)
-            - after_aggregate: Called after aggregation (receives AggregatedModel)
-            - on_training_complete: Called with TrainingResult after training
-            - on_model_sent: Called with (peer_ids, model_size) after sending
-            - on_aggregation_complete: Called with AggregatedModel after aggregation
+            - before_aggregate: Called before aggregation
+            - after_aggregate: Called after aggregation
+            - on_training_complete: Called after training
+            - on_model_sent: Called after sending model
+            - on_aggregation_complete: Called after aggregation
         """
         self.aggregator.register_hook(hook_name, callback)
 
@@ -236,9 +237,10 @@ class LearningNode:
             metrics: Optional metrics dict (loss, accuracy, etc.)
         """
         if self.model_store:
-            self.model_store.save_checkpoint(
+            weights = await self.aggregator.get_model_weights_snapshot()
+            await self.model_store.save_checkpoint_async(
                 round_number=self.aggregator.current_round,
-                weights=self.model.get_weights(),
+                weights=weights,
                 metrics=metrics or {}
             )
         else:

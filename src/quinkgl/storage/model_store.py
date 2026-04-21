@@ -12,10 +12,14 @@ arbitrary code execution vulnerabilities when loading checkpoints.
 - Helper methods to reduce code duplication
 - Input validation for robustness
 """
+import os
+import asyncio
 import hashlib
 import io
 import logging
+import re
 import threading
+import tempfile
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +30,8 @@ import msgpack
 
 logger = logging.getLogger(__name__)
 
+CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 # Custom Exceptions (optional, for better error handling)
 class ModelStoreError(Exception):
     """Base exception for ModelStore errors."""
@@ -34,6 +40,23 @@ class ModelStoreError(Exception):
 class CheckpointNotFoundError(ModelStoreError):
     """Raised when a checkpoint is not found."""
     pass
+
+
+def _validate_checkpoint_id(checkpoint_id: str) -> str:
+    if not isinstance(checkpoint_id, str) or not CHECKPOINT_ID_PATTERN.fullmatch(checkpoint_id):
+        raise ValueError("checkpoint_id must match ^[A-Za-z0-9_-]{1,64}$")
+    return checkpoint_id
+
+
+def _checkpoint_payload_dict(checkpoint: "ModelCheckpoint") -> Dict[str, Any]:
+    return {
+        "round_number": checkpoint.round_number,
+        "timestamp": _serialize_value(checkpoint.timestamp),
+        "metrics": _serialize_value(checkpoint.metrics),
+        "contributing_peers": _serialize_value(checkpoint.contributing_peers),
+        "checkpoint_id": checkpoint.checkpoint_id,
+        "weights": _serialize_value(checkpoint.weights),
+    }
 
 @dataclass
 class ModelCheckpoint:
@@ -58,18 +81,31 @@ class ModelCheckpoint:
             content = f"{self.round_number}_{self.timestamp}"
             self.checkpoint_id = hashlib.sha256(content.encode()).hexdigest()[:16]
 
+        self.checkpoint_id = _validate_checkpoint_id(self.checkpoint_id)
+
         # Generate checksum if not provided (backward compatible - optional field)
         if not self.checksum:
             self.checksum = self._compute_checksum()
 
     def _compute_checksum(self) -> str:
         """Compute SHA256 checksum of the checkpoint metadata."""
-        content = f"{self.checkpoint_id}:{self.round_number}:{len(self.contributing_peers)}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        payload = _checkpoint_payload_dict(self)
+        return hashlib.sha256(msgpack.packb(payload, use_bin_type=True)).hexdigest()[:16]
 
     def verify_checksum(self) -> bool:
         """Verify that the stored checksum matches the computed one."""
         return self.checksum == self._compute_checksum()
+
+
+@dataclass
+class CheckpointMetadata:
+    checkpoint_id: str
+    round_number: int
+    timestamp: datetime
+    metrics: Dict[str, float] = field(default_factory=dict)
+    contributing_peers: List[str] = field(default_factory=list)
+    checksum: str = ""
+    size_bytes: int = 0
 
 # Serialization Utilities
 def _serialize_numpy_array(arr: np.ndarray) -> bytes:
@@ -131,23 +167,55 @@ def _serialize_checkpoint(
     compress: bool = False
 ) -> bytes:
     """Serialize a checkpoint to bytes using msgpack."""
-    data = {
-        "round_number": checkpoint.round_number,
-        "timestamp": _serialize_value(checkpoint.timestamp),
-        "metrics": checkpoint.metrics,
-        "contributing_peers": checkpoint.contributing_peers,
-        "checkpoint_id": checkpoint.checkpoint_id,
-        # Include checksum for new checkpoints (backward compatible)
-        "checksum": checkpoint.checksum,
-        # Serialize weights specially
-        "weights": _serialize_value(checkpoint.weights)
-    }
+    data = _checkpoint_payload_dict(checkpoint)
+    data["checksum"] = checkpoint.checksum
     serialized = msgpack.packb(data, use_bin_type=True)
 
     if compress:
         serialized = zlib.compress(serialized, level=3)
 
     return serialized
+
+
+def _checkpoint_metadata_dict(metadata: CheckpointMetadata) -> Dict[str, Any]:
+    return {
+        "round_number": metadata.round_number,
+        "timestamp": _serialize_value(metadata.timestamp),
+        "metrics": _serialize_value(metadata.metrics),
+        "contributing_peers": _serialize_value(metadata.contributing_peers),
+        "checkpoint_id": metadata.checkpoint_id,
+        "checksum": metadata.checksum,
+        "size_bytes": metadata.size_bytes,
+    }
+
+
+def _serialize_checkpoint_metadata(metadata: CheckpointMetadata) -> bytes:
+    return msgpack.packb(_checkpoint_metadata_dict(metadata), use_bin_type=True)
+
+
+def _deserialize_checkpoint_metadata(data: bytes) -> CheckpointMetadata:
+    unpacked = msgpack.unpackb(data, raw=False)
+    return CheckpointMetadata(
+        round_number=unpacked["round_number"],
+        timestamp=_deserialize_value(unpacked["timestamp"]),
+        metrics=_deserialize_value(unpacked.get("metrics", {})),
+        contributing_peers=_deserialize_value(unpacked.get("contributing_peers", [])),
+        checkpoint_id=_validate_checkpoint_id(unpacked["checkpoint_id"]),
+        checksum=unpacked.get("checksum", ""),
+        size_bytes=unpacked.get("size_bytes", 0),
+    )
+
+
+def _checkpoint_to_metadata(checkpoint: ModelCheckpoint, size_bytes: int = 0) -> CheckpointMetadata:
+    return CheckpointMetadata(
+        checkpoint_id=checkpoint.checkpoint_id,
+        round_number=checkpoint.round_number,
+        timestamp=checkpoint.timestamp,
+        metrics=checkpoint.metrics,
+        contributing_peers=checkpoint.contributing_peers,
+        checksum=checkpoint.checksum,
+        size_bytes=size_bytes,
+    )
 
 def _deserialize_checkpoint(data: bytes, compressed: bool = False) -> ModelCheckpoint:
     """Deserialize bytes to a checkpoint using msgpack."""
@@ -217,6 +285,8 @@ class ModelStore:
         # Cache for list_checkpoints to avoid repeated disk scans
         self._list_cache: Optional[List[ModelCheckpoint]] = None
         self._cache_dirty: bool = True
+        self._metadata_cache: Optional[List[CheckpointMetadata]] = None
+        self._storage_size_cache: Optional[int] = None
 
         if self.storage_dir:
             self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -225,8 +295,25 @@ class ModelStore:
     # Helper Methods (reduce code duplication)
     def _get_checkpoint_path(self, checkpoint_id: str) -> Path:
         """Get the file path for a checkpoint (handles compression)."""
+        checkpoint_id = _validate_checkpoint_id(checkpoint_id)
         ext = ".msgpack.gz" if self.compression else ".msgpack"
         return self.storage_dir / f"checkpoint_{checkpoint_id}{ext}"
+
+    def _get_metadata_path(self, checkpoint_id: str) -> Path:
+        checkpoint_id = _validate_checkpoint_id(checkpoint_id)
+        return self.storage_dir / f"checkpoint_{checkpoint_id}.meta.msgpack"
+
+    def _checkpoint_id_from_path(self, filepath: Path) -> str:
+        name = filepath.name
+        if name.endswith(".msgpack.gz"):
+            checkpoint_id = name[len("checkpoint_"):-len(".msgpack.gz")]
+        elif name.endswith(".msgpack"):
+            checkpoint_id = name[len("checkpoint_"):-len(".msgpack")]
+        elif name.endswith(".pkl"):
+            checkpoint_id = name[len("checkpoint_"):-len(".pkl")]
+        else:
+            raise ValueError(f"Unsupported checkpoint filename: {name}")
+        return _validate_checkpoint_id(checkpoint_id)
 
     def _find_checkpoint_files(self) -> List[Path]:
         """Find all checkpoint files on disk (handles multiple formats)."""
@@ -237,7 +324,11 @@ class ModelStore:
         # New formats with compression
         if self.compression:
             files.extend(self.storage_dir.glob("checkpoint_*.msgpack.gz"))
-        files.extend(self.storage_dir.glob("checkpoint_*.msgpack"))
+        files.extend(
+            filepath
+            for filepath in self.storage_dir.glob("checkpoint_*.msgpack")
+            if not filepath.name.endswith(".meta.msgpack")
+        )
         # Old format (for migration warning only)
         files.extend(self.storage_dir.glob("checkpoint_*.pkl"))
         return files
@@ -245,6 +336,59 @@ class ModelStore:
     def _invalidate_cache(self) -> None:
         """Invalidate the list cache."""
         self._cache_dirty = True
+        self._metadata_cache = None
+        self._storage_size_cache = None
+
+    def _write_bytes_atomically(self, filepath: Path, data: bytes) -> None:
+        temp_path = None
+        try:
+            fd, temp_path = tempfile.mkstemp(
+                dir=str(filepath.parent),
+                prefix=f".{filepath.name}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, 'wb') as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, filepath)
+        except Exception:
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+            raise
+
+    def _save_metadata_to_disk(self, checkpoint: ModelCheckpoint, size_bytes: int) -> None:
+        metadata = _checkpoint_to_metadata(checkpoint, size_bytes=size_bytes)
+        metadata_path = self._get_metadata_path(checkpoint.checkpoint_id)
+        self._write_bytes_atomically(metadata_path, _serialize_checkpoint_metadata(metadata))
+
+    def _load_metadata_from_disk(self, checkpoint_id: str) -> Optional[CheckpointMetadata]:
+        metadata_path = self._get_metadata_path(checkpoint_id)
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, 'rb') as f:
+                    return _deserialize_checkpoint_metadata(f.read())
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint metadata for {checkpoint_id}: {e}")
+
+        checkpoint = self._load_from_disk(checkpoint_id)
+        if checkpoint is None:
+            return None
+
+        size_bytes = 0
+        filepath = self._get_checkpoint_path(checkpoint_id)
+        if filepath.exists():
+            size_bytes = filepath.stat().st_size
+
+        metadata = _checkpoint_to_metadata(checkpoint, size_bytes=size_bytes)
+        try:
+            self._save_metadata_to_disk(checkpoint, size_bytes)
+        except Exception as e:
+            logger.warning(f"Failed to rebuild checkpoint metadata for {checkpoint_id}: {e}")
+        return metadata
 
     def _enforce_memory_limit(self) -> None:
         """Enforce max memory checkpoints by removing oldest."""
@@ -285,32 +429,48 @@ class ModelStore:
                 contributing_peers=contributing_peers or []
             )
 
-            # Invalidate cache
-            self._invalidate_cache()
+            if self.storage_dir:
+                size_bytes = self._save_to_disk(checkpoint)
+                try:
+                    self._save_metadata_to_disk(checkpoint, size_bytes)
+                except Exception as e:
+                    logger.warning(f"Failed to persist checkpoint metadata for {checkpoint.checkpoint_id}: {e}")
 
-            # Store in memory
+            self._invalidate_cache()
+            self._round_index[round_number] = checkpoint.checkpoint_id
+
             if self.keep_in_memory:
                 self._checkpoints[checkpoint.checkpoint_id] = checkpoint
-                self._round_index[round_number] = checkpoint.checkpoint_id
                 self._enforce_memory_limit()
-
-            # Store on disk
-            if self.storage_dir:
-                self._save_to_disk(checkpoint)
 
             logger.debug(f"Saved checkpoint for round {round_number}: {checkpoint.checkpoint_id}")
             return checkpoint
 
-    def _save_to_disk(self, checkpoint: ModelCheckpoint) -> None:
+    async def save_checkpoint_async(
+        self,
+        round_number: int,
+        weights: Any,
+        metrics: Optional[Dict[str, float]] = None,
+        contributing_peers: Optional[List[str]] = None,
+    ) -> ModelCheckpoint:
+        return await asyncio.to_thread(
+            self.save_checkpoint,
+            round_number,
+            weights,
+            metrics,
+            contributing_peers,
+        )
+
+    def _save_to_disk(self, checkpoint: ModelCheckpoint) -> int:
         """Save checkpoint to disk using safe msgpack serialization."""
         filepath = self._get_checkpoint_path(checkpoint.checkpoint_id)
 
         try:
             serialized = _serialize_checkpoint(checkpoint, compress=self.compression)
-            with open(filepath, 'wb') as f:
-                f.write(serialized)
+            self._write_bytes_atomically(filepath, serialized)
+            return len(serialized)
         except Exception as e:
-            logger.error(f"Failed to save checkpoint to disk: {e}")
+            raise ModelStoreError(f"Failed to save checkpoint to disk: {e}") from e
 
     def load_checkpoint(self, checkpoint_id: str) -> Optional[ModelCheckpoint]:
         """
@@ -323,6 +483,8 @@ class ModelStore:
             ModelCheckpoint or None if not found
         """
         with self._lock:
+            checkpoint_id = _validate_checkpoint_id(checkpoint_id)
+
             # Check memory first
             if checkpoint_id in self._checkpoints:
                 return self._checkpoints[checkpoint_id]
@@ -333,8 +495,13 @@ class ModelStore:
 
             return None
 
+    async def load_checkpoint_async(self, checkpoint_id: str) -> Optional[ModelCheckpoint]:
+        return await asyncio.to_thread(self.load_checkpoint, checkpoint_id)
+
     def _load_from_disk(self, checkpoint_id: str) -> Optional[ModelCheckpoint]:
         """Load checkpoint from disk using safe msgpack deserialization."""
+        checkpoint_id = _validate_checkpoint_id(checkpoint_id)
+
         # Try new compressed format first
         if self.compression:
             filepath = self.storage_dir / f"checkpoint_{checkpoint_id}.msgpack.gz"
@@ -368,7 +535,8 @@ class ModelStore:
             if checkpoint.checksum and not checkpoint.verify_checksum():
                 logger.warning(f"Checksum mismatch for checkpoint {checkpoint.checkpoint_id}")
 
-            # Cache in memory if enabled
+            self._round_index[checkpoint.round_number] = checkpoint.checkpoint_id
+
             if self.keep_in_memory:
                 self._checkpoints[checkpoint.checkpoint_id] = checkpoint
 
@@ -395,13 +563,19 @@ class ModelStore:
             # Search disk if not in index
             if self.storage_dir:
                 for filepath in self._find_checkpoint_files():
-                    checkpoint_id = filepath.stem.replace("checkpoint_", "")
+                    try:
+                        checkpoint_id = self._checkpoint_id_from_path(filepath)
+                    except ValueError:
+                        continue
                     checkpoint = self._load_from_disk(checkpoint_id)
                     if checkpoint and checkpoint.round_number == round_number:
                         self._round_index[round_number] = checkpoint.checkpoint_id
                         return checkpoint
 
             return None
+
+    async def get_checkpoint_by_round_async(self, round_number: int) -> Optional[ModelCheckpoint]:
+        return await asyncio.to_thread(self.get_checkpoint_by_round, round_number)
 
     def get_latest_checkpoint(self) -> Optional[ModelCheckpoint]:
         """Get the most recent checkpoint (thread-safe)."""
@@ -415,6 +589,9 @@ class ModelStore:
                 return self._checkpoints.get(checkpoint_id) or self._load_from_disk(checkpoint_id)
 
             return None
+
+    async def get_latest_checkpoint_async(self) -> Optional[ModelCheckpoint]:
+        return await asyncio.to_thread(self.get_latest_checkpoint)
 
     def list_checkpoints(self) -> List[ModelCheckpoint]:
         """
@@ -437,7 +614,10 @@ class ModelStore:
             # Add disk checkpoints if not in memory
             if self.storage_dir:
                 for filepath in self._find_checkpoint_files():
-                    checkpoint_id = filepath.stem.replace("checkpoint_", "")
+                    try:
+                        checkpoint_id = self._checkpoint_id_from_path(filepath)
+                    except ValueError:
+                        continue
                     # Skip .pkl files (not loaded for security)
                     if filepath.suffix == ".pkl":
                         continue
@@ -455,6 +635,49 @@ class ModelStore:
 
             return checkpoints.copy()
 
+    def list_checkpoint_metadata(self) -> List[CheckpointMetadata]:
+        with self._lock:
+            if not self._cache_dirty and self._metadata_cache is not None:
+                return self._metadata_cache.copy()
+
+            metadata_entries: List[CheckpointMetadata] = []
+            seen_checkpoint_ids = set()
+
+            if self.keep_in_memory:
+                for checkpoint in self._checkpoints.values():
+                    size_bytes = 0
+                    if self.storage_dir:
+                        filepath = self._get_checkpoint_path(checkpoint.checkpoint_id)
+                        if filepath.exists():
+                            size_bytes = filepath.stat().st_size
+                    metadata_entries.append(_checkpoint_to_metadata(checkpoint, size_bytes=size_bytes))
+                    seen_checkpoint_ids.add(checkpoint.checkpoint_id)
+
+            if self.storage_dir:
+                for filepath in self._find_checkpoint_files():
+                    try:
+                        checkpoint_id = self._checkpoint_id_from_path(filepath)
+                    except ValueError:
+                        continue
+                    if filepath.suffix == ".pkl" or checkpoint_id in seen_checkpoint_ids:
+                        continue
+                    metadata = self._load_metadata_from_disk(checkpoint_id)
+                    if metadata is not None:
+                        if metadata.size_bytes == 0 and filepath.exists():
+                            metadata.size_bytes = filepath.stat().st_size
+                        metadata_entries.append(metadata)
+
+            metadata_entries.sort(key=lambda c: c.round_number)
+            self._metadata_cache = metadata_entries
+            self._cache_dirty = False
+            return metadata_entries.copy()
+
+    async def list_checkpoint_metadata_async(self) -> List[CheckpointMetadata]:
+        return await asyncio.to_thread(self.list_checkpoint_metadata)
+
+    async def list_checkpoints_async(self) -> List[ModelCheckpoint]:
+        return await asyncio.to_thread(self.list_checkpoints)
+
     def delete_checkpoint(self, checkpoint_id: str) -> bool:
         """
         Delete a checkpoint (thread-safe).
@@ -466,6 +689,7 @@ class ModelStore:
             True if deleted, False if not found
         """
         with self._lock:
+            checkpoint_id = _validate_checkpoint_id(checkpoint_id)
             found = False
 
             # Remove from memory
@@ -484,8 +708,15 @@ class ModelStore:
                     if filepath.exists():
                         filepath.unlink()
                         found = True
+                metadata_path = self._get_metadata_path(checkpoint_id)
+                if metadata_path.exists():
+                    metadata_path.unlink()
+                    found = True
 
             return found
+
+    async def delete_checkpoint_async(self, checkpoint_id: str) -> bool:
+        return await asyncio.to_thread(self.delete_checkpoint, checkpoint_id)
 
     def clear_old_checkpoints(self, keep_last_n: int = 5) -> None:
         """
@@ -495,7 +726,7 @@ class ModelStore:
             keep_last_n: Number of recent checkpoints to keep
         """
         with self._lock:
-            checkpoints = self.list_checkpoints()
+            checkpoints = self.list_checkpoint_metadata()
 
             if len(checkpoints) <= keep_last_n:
                 return
@@ -506,6 +737,9 @@ class ModelStore:
                 self.delete_checkpoint(checkpoint.checkpoint_id)
 
             logger.info(f"Cleared {len(to_delete)} old checkpoints, kept {keep_last_n}")
+
+    async def clear_old_checkpoints_async(self, keep_last_n: int = 5) -> None:
+        await asyncio.to_thread(self.clear_old_checkpoints, keep_last_n)
 
     def get_storage_size(self) -> int:
         """
@@ -522,7 +756,14 @@ class ModelStore:
                     for c in self._checkpoints.values()
                 )
 
+            if self._storage_size_cache is not None:
+                return self._storage_size_cache
+
             total = 0
-            for filepath in self._find_checkpoint_files():
-                total += filepath.stat().st_size
+            for metadata in self.list_checkpoint_metadata():
+                total += metadata.size_bytes
+            self._storage_size_cache = total
             return total
+
+    async def get_storage_size_async(self) -> int:
+        return await asyncio.to_thread(self.get_storage_size)

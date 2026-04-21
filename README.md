@@ -31,11 +31,10 @@ QuinkGL draws from the gossip learning paradigm [[Ormándi et al., 2013]](#refer
 | **Byzantine Fault Tolerance** | Krum, MultiKrum, TrimmedMean aggregation strategies |
 | **NAT Traversal** | IPv8 with UDP hole punching + automatic tunnel fallback |
 | **Framework Agnostic** | PyTorch, TensorFlow, or custom model wrappers |
-| **Swarm Manifest** | Canonical SHA-256 commitment to training protocol and privacy policy |
+| **Swarm Manifest (planned)** | Manifest and protocol-identity work is under active development |
 | **Personalized FL** | APFL adaptive mixing, FedRep-style backbone/head split |
 | **Staleness-Aware** | StalenessWeightedFedAvg for asynchronous environments |
 | **Variance Reduction** | SCAFFOLD with gossip-adapted control variates (Karimireddy et al., 2020) |
-| **Error Feedback** | Residual buffer for biased compressors — convergence-guaranteed Top-k/quantization |
 | **Spectral Analysis** | Runtime algebraic connectivity (λ₂) and spectral gap measurement for topology evaluation |
 | **Observability** | Event-driven telemetry with terminal rendering |
 
@@ -52,7 +51,7 @@ For development:
 ```bash
 git clone https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework.git
 cd QuinkGL-Gossip-Learning-Framework
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 ---
@@ -297,9 +296,9 @@ Fingerprint payloads are schema-versioned, strictly validated on parse, and can 
 
 ## Swarm Manifest
 
-The **Swarm Manifest** provides cryptographic commitment to the training protocol. It binds model architecture, aggregation strategy, topology rules, and data policy into a single SHA-256 hash — analogous to a BitTorrent info hash. Two peers with the same manifest ID are, by definition, running the same training protocol.
+The **Swarm Manifest** is a planned protocol-identity layer for binding swarm compatibility to a canonical description of the training protocol. The current repository snapshot exposes policy dataclasses under `quinkgl.manifest`, but it does not yet ship the full canonical manifest hash and community-ID isolation model described in the long-term design.
 
-Manifest serialization is canonicalized before hashing, and manifest payloads are schema-versioned and strictly validated to avoid silent field drops or incompatible policy mixes.
+Until that implementation lands, manifest-related material should be read as design direction rather than as a guaranteed runtime property of the current package build.
 
 ---
 

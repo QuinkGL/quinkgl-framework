@@ -7,7 +7,7 @@ Abstract base class for all aggregation strategies.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import logging
 
@@ -32,8 +32,8 @@ class ModelUpdate:
     accuracy: Optional[float] = None
     round_number: int = 0
 
-    # Timestamp
-    timestamp: datetime = field(default_factory=datetime.now)
+    # Timestamp (UTC-aware to avoid naive datetime issues)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -45,7 +45,7 @@ class AggregatedModel:
     contributing_peers: List[str]
     total_samples: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # Store the original updates for reference and advanced strategies
     updates: List[ModelUpdate] = field(default_factory=list)
 
@@ -106,6 +106,15 @@ class AggregationStrategy(ABC):
         if not updates:
             raise ValueError("Cannot aggregate empty list of updates")
 
+        # Reject duplicate peer_ids to prevent double-counting
+        seen_peers: set = set()
+        for update in updates:
+            if update.peer_id in seen_peers:
+                raise ValueError(
+                    f"Duplicate peer_id in updates: {update.peer_id}"
+                )
+            seen_peers.add(update.peer_id)
+
         # Check for NaN/Inf in weights
         for update in updates:
             self._check_weights_valid(update)
@@ -144,10 +153,21 @@ class AggregationStrategy(ABC):
                         raise ValueError(f"Weights[{key}] from {update.peer_id} contain NaN")
                     if np.isinf(value).any():
                         raise ValueError(f"Weights[{key}] from {update.peer_id} contain Inf")
+                elif isinstance(value, dict):
+                    self._check_weights_valid(
+                        ModelUpdate(
+                            peer_id=update.peer_id,
+                            weights=value,
+                            metadata={},
+                        )
+                    )
 
     def _get_shape(self, weights: Any) -> tuple:
         """
         Get the shape of weights if possible.
+
+        Recursively walks nested dicts and lists to build a deterministic
+        shape signature for cross-update compatibility checks.
 
         Args:
             weights: Weights object (numpy array, dict, etc.)
@@ -158,9 +178,30 @@ class AggregationStrategy(ABC):
         if isinstance(weights, np.ndarray):
             return weights.shape
         elif isinstance(weights, dict):
-            # Return sorted tuple of keys for dict weights
-            return tuple(sorted(weights.keys()))
+            items = []
+            for key in sorted(weights.keys()):
+                items.append((key, self._get_shape(weights[key])))
+            return tuple(items)
+        elif isinstance(weights, (list, tuple)):
+            return tuple(self._get_shape(item) for item in weights)
         return ()
+
+    def state_dict(self) -> Dict[str, Any]:
+        """
+        Return a serializable snapshot of strategy state.
+
+        Subclasses should override this to persist learnable / mutable
+        state (e.g. momentum buffers, control variates).
+        """
+        return {"config": dict(self.config)}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """
+        Restore strategy state from a snapshot.
+
+        Subclasses should override this alongside ``state_dict()``.
+        """
+        self.config = dict(state.get("config", {}))
 
     def _clip_value(self, value: float, min_val: float = 0.1, max_val: float = 10.0) -> float:
         """

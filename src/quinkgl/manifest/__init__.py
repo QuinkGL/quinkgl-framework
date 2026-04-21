@@ -6,6 +6,7 @@ from quinkgl.manifest.schema import (
     DataPolicy,
     PersonalizationPolicy,
     PrototypePolicy,
+    SwarmManifest,
 )
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "DataPolicy",
     "PersonalizationPolicy",
     "PrototypePolicy",
+    "SwarmManifest",
     "MANIFEST_SCHEMA_VERSION",
 ]

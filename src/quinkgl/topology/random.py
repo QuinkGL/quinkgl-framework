@@ -4,8 +4,8 @@ Random Topology Strategy
 Simplest topology strategy: randomly select k peers from known peers.
 """
 import random
+import time
 from typing import List, Optional, Set, Dict, Any
-from datetime import datetime
 from quinkgl.topology.base import TopologyStrategy, SelectionContext, PeerInfo
 
 class RandomTopology(TopologyStrategy):
@@ -41,21 +41,21 @@ class RandomTopology(TopologyStrategy):
         self._cache_duration: float = cache_duration
         self._last_cache_time: float = 0
         self._cached_peer_ids: Set[str] = set()
-        self._domain_schema_key: str = "" 
+        self._cache_key: str = "" 
 
-    def _is_cache_valid(self, current_time: float, domain_schema_key: str) -> bool:
+    def _is_cache_valid(self, current_time: float, cache_key: str) -> bool:
         """Check if the cache is still valid."""
         return (
             self._cache_duration > 0
-            and domain_schema_key == self._domain_schema_key
+            and cache_key == self._cache_key
             and (current_time - self._last_cache_time) < self._cache_duration
         )
 
-    def _update_cache(self, peer_ids: Set[str], domain_schema_key: str) -> None:
+    def _update_cache(self, peer_ids: Set[str], cache_key: str) -> None:
         """Update the cache with new peer IDs."""
         self._cached_peer_ids = peer_ids.copy()
-        self._domain_schema_key = domain_schema_key
-        self._last_cache_time = datetime.now().timestamp()
+        self._cache_key = cache_key
+        self._last_cache_time = time.monotonic()
 
     def _get_compatible_peer_ids(self, context: SelectionContext) -> Set[str]:
         """
@@ -67,16 +67,17 @@ class RandomTopology(TopologyStrategy):
         Returns:
             Set of compatible peer IDs
         """
-        domain_schema_key = f"{context.my_domain}:{context.my_data_schema_hash}"
-        current_time = datetime.now().timestamp()
+        # TOP-05, TOP-17: Include manifest_id and model_version in cache key, use monotonic time
+        cache_key = f"{context.my_domain}:{context.my_data_schema_hash}:{context.my_manifest_id}:{context.my_model_version}:{len(context.known_peers)}"
+        current_time = time.monotonic()
 
-        if self._is_cache_valid(current_time, domain_schema_key):
+        if self._is_cache_valid(current_time, cache_key):
             return self._cached_peer_ids.copy()
 
         compatible = context.get_compatible_peers(exclude_self=True)
         peer_ids = {p.peer_id for p in compatible}
 
-        self._update_cache(peer_ids, domain_schema_key)
+        self._update_cache(peer_ids, cache_key)
 
         return peer_ids
 

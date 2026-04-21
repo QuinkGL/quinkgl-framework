@@ -20,7 +20,9 @@ from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
     ModelUpdatePayload,
     ModelChunkPayload,
+    MAX_ROUND_SKIP,
 )
+from quinkgl.network.model_serializer import serialize_model
 from quinkgl.gossip.protocol import GossipProtocol
 
 
@@ -43,13 +45,22 @@ def _make_community():
     community.node_id = "local"
     community.data_schema_hash = "abc"
     community.on_model_update_callback = None
+    community.require_signature = False
+    community.event_emitter = MagicMock()
+    community.last_seen_round_state_path = ""
+    community.max_round_skip = MAX_ROUND_SKIP
+    community.current_round_provider = lambda: 0
+    community._load_last_seen_round_state = GossipLearningCommunity._load_last_seen_round_state.__get__(community)
+    community._persist_last_seen_round_state = GossipLearningCommunity._persist_last_seen_round_state.__get__(community)
+    community._record_last_seen_round = GossipLearningCommunity._record_last_seen_round.__get__(community)
+    community._get_local_round = GossipLearningCommunity._get_local_round.__get__(community)
     return community
 
 
 def _model_update_payload(sender_id, round_number):
     return ModelUpdatePayload(
         sender_id=sender_id,
-        weights_bytes=b"\x00" * 16,
+        weights_bytes=serialize_model({"w": [1.0, 2.0]}),
         sample_count=8,
         round_number=round_number,
         data_schema_hash="abc",
@@ -68,7 +79,7 @@ def _chunk_payload(transfer_id, sender_id, round_number, chunk_index=0,
         sample_count=8,
         loss=0.0,
         accuracy=0.0,
-        chunk_data=b"\x00" * 10,
+        chunk_data=serialize_model({"w": [1.0, 2.0]}),
     )
 
 
@@ -120,6 +131,30 @@ class TestModelUpdateReplay:
 
         assert c._last_seen_round[mid] == 10
 
+    @pytest.mark.asyncio
+    async def test_rejects_future_round(self):
+        c = _make_community()
+        c.current_round_provider = lambda: 5
+        peer = _make_peer("ab" * 20)
+
+        payload = _model_update_payload("node-future", round_number=MAX_ROUND_SKIP + 6)
+        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+
+        assert c._last_seen_round == {}
+        emitted = [call.args[0] for call in c.event_emitter.emit.call_args_list]
+        assert emitted == ["security.future_round_rejected", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_callback_failure_does_not_advance_round(self):
+        c = _make_community()
+        peer = _make_peer("ac" * 20)
+        c.on_model_update_callback = AsyncMock(side_effect=RuntimeError("boom"))
+
+        payload = _model_update_payload("node-cb", round_number=7)
+        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+
+        assert peer.mid.hex() not in c._last_seen_round
+
 
 # ── B15-3: on_model_chunk rejects replay on new buffer ──────
 
@@ -147,6 +182,45 @@ class TestChunkReplay:
 
         # Buffer should have been created
         assert len(c._chunk_buffers) == 1
+
+    @pytest.mark.asyncio
+    async def test_rejects_future_round_chunked(self):
+        c = _make_community()
+        c.current_round_provider = lambda: 3
+        peer = _make_peer("de" * 20)
+
+        payload = _chunk_payload("tid-future", "node-future", round_number=MAX_ROUND_SKIP + 4)
+        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+
+        assert len(c._chunk_buffers) == 0
+        emitted = [call.args[0] for call in c.event_emitter.emit.call_args_list]
+        assert emitted == ["security.future_round_rejected", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_chunk_callback_failure_does_not_advance_round(self):
+        c = _make_community()
+        peer = _make_peer("df" * 20)
+        c.on_model_update_callback = AsyncMock(side_effect=RuntimeError("chunk boom"))
+
+        payload = _chunk_payload("tid-cb", "node-cb", round_number=11, total_chunks=1)
+        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+
+        assert peer.mid.hex() not in c._last_seen_round
+
+
+class TestReplayPersistence:
+    def test_record_last_seen_round_persists_to_disk(self, tmp_path):
+        c = _make_community()
+        state_path = tmp_path / "last_seen_round.json"
+        c.last_seen_round_state_path = str(state_path)
+
+        c._record_last_seen_round("aa" * 20, 9)
+
+        assert state_path.exists()
+        reloaded = _make_community()
+        reloaded.last_seen_round_state_path = str(state_path)
+        reloaded._load_last_seen_round_state()
+        assert reloaded._last_seen_round["aa" * 20] == 9
 
 
 # ── B15-4: MAX_MESSAGE_AGE_SECONDS tightened ────────────────

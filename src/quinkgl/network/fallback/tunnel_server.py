@@ -73,7 +73,7 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
                                 self.tunnels[node_id] = message_queue
                                 self.last_seen[node_id] = datetime.now()
                                 logger.info(f"✓ Registered tunnel for node '{node_id}'")
-                                
+
                                 # B17 §6.3: Incremental peer notification
                                 # Send full peer list only to the NEW node.
                                 # Send a single-element diff (new-peer-joined) to existing nodes.
@@ -106,7 +106,17 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
                                         ))
                                     except asyncio.QueueFull:
                                         logger.warning(f"Queue full for {pid}, skipping diff")
-                            
+
+                            elif node_id is None:
+                                logger.warning("Received tunnel message before REGISTER — ignored")
+                                continue
+
+                            elif msg.node_id != node_id:
+                                logger.warning(
+                                    f"Rejected tunnel message with spoofed sender: stream={node_id} payload={msg.node_id}"
+                                )
+                                continue
+
                             elif msg.type == tunnel_pb2.HEARTBEAT:
                                 if msg.node_id in self.last_seen:
                                     self.last_seen[msg.node_id] = datetime.now()

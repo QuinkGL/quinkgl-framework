@@ -82,15 +82,28 @@ class PrototypeStore:
                 label_accum.setdefault(proto.label, []).append(
                     (proto.embedding, proto.sample_count)
                 )
-        self.global_prototypes = {}
+        # Don't reset global_prototypes - accumulate incrementally
         for label, entries in label_accum.items():
             total_samples = sum(n for _, n in entries)
             weighted_sum = sum(emb * n for emb, n in entries)
-            self.global_prototypes[label] = ClassPrototype(
-                label=label,
-                embedding=weighted_sum / total_samples,
-                sample_count=total_samples,
-            )
+            if label in self.global_prototypes:
+                # Merge with existing global prototype using sample-weighted average
+                existing = self.global_prototypes[label]
+                combined_samples = existing.sample_count + total_samples
+                combined_embedding = (
+                    existing.embedding * existing.sample_count + weighted_sum
+                ) / combined_samples
+                self.global_prototypes[label] = ClassPrototype(
+                    label=label,
+                    embedding=combined_embedding,
+                    sample_count=combined_samples,
+                )
+            else:
+                self.global_prototypes[label] = ClassPrototype(
+                    label=label,
+                    embedding=weighted_sum / total_samples,
+                    sample_count=total_samples,
+                )
         return self.global_prototypes
 
     def prototype_alignment_loss(self) -> float:
@@ -139,7 +152,8 @@ class FedPACCollaborator:
                     )
                     total_diff += diff
                     shared += 1
-            discrepancy[peer_id] = total_diff / max(shared, 1)
+            # Return infinity for zero-overlap peers (they should be filtered out)
+            discrepancy[peer_id] = total_diff / max(shared, 1) if shared > 0 else float('inf')
         return discrepancy
 
     def compute_combination_weights(
@@ -149,11 +163,19 @@ class FedPACCollaborator:
     ) -> Dict[str, float]:
         if not discrepancy:
             return {}
+        if temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {temperature}")
+        # Filter out zero-overlap peers (discrepancy = inf)
+        valid_peers = {pid: d for pid, d in discrepancy.items() if d != float('inf')}
+        if not valid_peers:
+            # All peers have zero overlap, return uniform weights
+            n = len(discrepancy)
+            return {pid: 1.0 / n for pid in discrepancy}
         exp_scores: Dict[str, float] = {}
-        for pid, d in discrepancy.items():
+        for pid, d in valid_peers.items():
             exp_scores[pid] = np.exp(-d / temperature)
         total = sum(exp_scores.values())
         if total == 0:
-            n = len(discrepancy)
-            return {pid: 1.0 / n for pid in discrepancy}
+            n = len(valid_peers)
+            return {pid: 1.0 / n for pid in valid_peers}
         return {pid: s / total for pid, s in exp_scores.items()}

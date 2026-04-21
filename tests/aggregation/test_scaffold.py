@@ -246,6 +246,23 @@ class TestLocalControlVariate:
         # c_i = (w_global - w_local) / (K * eta) = (0.1, 0.2) / 0.1 = (1.0, 2.0)
         np.testing.assert_allclose(cv["fc"], [1.0, 2.0], atol=1e-6)
 
+    def test_compute_local_cv_dict_applies_option_two_with_prior_controls(self):
+        scaffold = Scaffold(learning_rate=0.1)
+        scaffold._c_global = {"fc": np.array([0.5, 0.5])}
+
+        global_w = {"fc": np.array([1.0, 2.0])}
+        local_w = {"fc": np.array([0.9, 1.8])}
+        local_cv = {"fc": np.array([0.25, 0.75])}
+
+        cv = scaffold.get_local_control_variate(
+            local_weights=local_w,
+            global_weights=global_w,
+            num_local_steps=1,
+            local_control_variate=local_cv,
+        )
+
+        np.testing.assert_allclose(cv["fc"], [0.75, 2.25], atol=1e-6)
+
     def test_compute_local_cv_numpy(self):
         scaffold = Scaffold(learning_rate=0.01)
 
@@ -260,6 +277,19 @@ class TestLocalControlVariate:
 
         # (5.0 - 4.9) / (1 * 0.01) = 10.0
         np.testing.assert_allclose(cv, [10.0], atol=1e-6)
+
+    def test_compute_local_cv_numpy_applies_option_two_with_prior_controls(self):
+        scaffold = Scaffold(learning_rate=0.1)
+        scaffold._c_global = {"__single__": np.array([0.5])}
+
+        cv = scaffold.get_local_control_variate(
+            local_weights=np.array([0.9]),
+            global_weights=np.array([1.0]),
+            num_local_steps=1,
+            local_control_variate={"__single__": np.array([0.25])},
+        )
+
+        np.testing.assert_allclose(cv, [0.75], atol=1e-6)
 
 
 # ------------------------------------------------------------------ #

@@ -7,6 +7,7 @@ training, peer selection, model exchange, and aggregation.
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any, List, Optional, Callable, Dict
 from datetime import datetime
 
@@ -48,7 +49,9 @@ class ModelAggregator:
         convergence_config: Optional[ConvergenceConfig] = None,
         stale_round_tolerance: int = 2,
         min_peers_for_consensus: int = 3,
-        max_round_ahead: int = 50
+        max_round_ahead: int = 50,
+        max_pending_updates: int = 1024,
+        model_store=None,
     ):
         """
         Initialize the model aggregator.
@@ -94,23 +97,45 @@ class ModelAggregator:
         )
         self.convergence_monitor = ConvergenceMonitor(config=convergence_config)
 
+        # Protocol validation instance
+        from quinkgl.gossip.protocol import GossipProtocol
+        self._protocol = GossipProtocol(peer_id)
+
+        # Optional model store for round persistence across restarts
+        self._model_store = model_store
+
         # State
         self.running = False
         self.current_round = 0
+        # Resume from latest checkpoint round if a store is configured
+        if self._model_store is not None:
+            try:
+                latest = self._model_store.get_latest_checkpoint()
+                if latest is not None:
+                    self.current_round = latest.round_number
+                    logger.info(
+                        f"Resumed at round {self.current_round} from checkpoint store"
+                    )
+            except Exception:
+                logger.warning("Failed to restore latest checkpoint round", exc_info=True)
         self.known_peers: Dict[str, PeerInfo] = {}
         self.pending_updates: List[ModelUpdate] = []
         self._pending_lock = asyncio.Lock()
+        self._model_lock = asyncio.Lock()
         self._aggregating = False
         self.stale_round_tolerance = stale_round_tolerance
+        self.max_pending_updates = max_pending_updates
         self._aggregation_event = asyncio.Event()
         self._background_tasks: set[asyncio.Task] = set()
         self._MAX_PENDING_EVENTS = 1024
         self._event_drop_warned = False
+        self._event_drop_count = 0
         self.metrics: Dict[str, float] = {} # Store latest training metrics
         self.metrics_history: List[Dict] = [] # History for plotting
         self.comm_log: List[Dict] = [] # Log of outgoing messages
         self._last_training_result = None  # Store last TrainingResult for sample_count
         # Task 7b: track per-peer rejection counts to warn on repeated round divergence.
+        self._MAX_PEER_REJECTION_ENTRIES = 256
         self._peer_rejection_counts: Dict[str, int] = {}
 
         # Domain-aware collaboration state (set by GossipNode)
@@ -135,11 +160,50 @@ class ModelAggregator:
             "after_receive": [],
             "before_aggregate": [],
             "after_aggregate": [],
-            # MCP monitoring hooks
+            # Additional lifecycle hooks
             "on_training_complete": [],  # Called with TrainingResult
             "on_model_sent": [],         # Called with (peer_ids, model_size)
             "on_aggregation_complete": [],  # Called with AggregatedModel
         }
+
+    async def get_model_weights_snapshot(self):
+        async with self._model_lock:
+            return self.model.get_weights()
+
+    async def _get_shared_model_weights_snapshot(self):
+        from quinkgl.models.base import PersonalizedModelWrapper
+
+        async with self._model_lock:
+            if isinstance(self.model, PersonalizedModelWrapper):
+                return self.model.get_backbone_weights()
+            return self.model.get_weights()
+
+    async def _apply_aggregated_weights(self, aggregated_weights: Any) -> None:
+        from quinkgl.models.base import PersonalizedModelWrapper, APFLMixin
+
+        async with self._model_lock:
+            if isinstance(self.model, PersonalizedModelWrapper):
+                self.model.set_backbone_weights(aggregated_weights)
+            else:
+                self.model.set_weights(aggregated_weights)
+
+            if isinstance(self.model, PersonalizedModelWrapper) and isinstance(self.model, APFLMixin):
+                local_weights = self.model.get_head_weights()
+                mixed = self.model.compute_personalized_weights(
+                    local_weights=local_weights,
+                    global_weights=aggregated_weights,
+                )
+                # APFL: write mixed weights to head, not backbone
+                # Head keys are separate from backbone keys
+                all_weights = self.model.get_weights()
+                for k, v in mixed.items():
+                    all_weights[k] = v
+                self.model.set_weights(all_weights)
+
+    async def _evaluate_model(self, data: Any) -> Dict[str, float]:
+        loop = asyncio.get_running_loop()
+        async with self._model_lock:
+            return await loop.run_in_executor(None, lambda: self.model.evaluate(data))
 
     def _spawn_task(self, coro) -> Optional[asyncio.Task]:
         """Create a tracked background task that auto-removes on completion."""
@@ -171,6 +235,7 @@ class ModelAggregator:
                 if not t.done() and t.get_name().startswith("evt:")
             )
             if event_tasks >= self._MAX_PENDING_EVENTS:
+                self._event_drop_count += 1
                 if not self._event_drop_warned:
                     logger.warning(
                         f"Event backlog reached {self._MAX_PENDING_EVENTS}, "
@@ -178,6 +243,17 @@ class ModelAggregator:
                     )
                     self._event_drop_warned = True
                 return
+
+            if self._event_drop_count > 0:
+                self.event_emitter.emit(
+                    "telemetry.events_dropped",
+                    {
+                        "node_id": self.peer_id,
+                        "count": self._event_drop_count,
+                        "max_pending_events": self._MAX_PENDING_EVENTS,
+                    },
+                )
+                self._event_drop_count = 0
             self._event_drop_warned = False
 
             task = self._spawn_task(self._deliver_event(event_type, payload))
@@ -319,6 +395,10 @@ class ModelAggregator:
         Args:
             message: The received message
         """
+        if not self._protocol.validate_message(message):
+            logger.debug(f"Dropping invalid message from {message.sender_id}")
+            return
+
         if message.msg_type == MessageType.MODEL_UPDATE:
             await self._handle_model_update(message)
         elif message.msg_type == MessageType.HEARTBEAT:
@@ -352,6 +432,13 @@ class ModelAggregator:
             # rejected — a sign that it may be permanently isolated.
             count = self._peer_rejection_counts.get(message.sender_id, 0) + 1
             self._peer_rejection_counts[message.sender_id] = count
+            # Prune oldest entries if bound exceeded
+            if len(self._peer_rejection_counts) > self._MAX_PEER_REJECTION_ENTRIES:
+                oldest_peer = min(
+                    self._peer_rejection_counts,
+                    key=lambda pid: (self._peer_rejection_counts[pid], pid)
+                )
+                del self._peer_rejection_counts[oldest_peer]
             if count == 1 or count % 5 == 0:
                 logger.warning(
                     f"Peer {message.sender_id} rejected {count} time(s) due to round "
@@ -389,8 +476,28 @@ class ModelAggregator:
             round_number=message.round_number
         )
 
+        dropped_due_to_backpressure = False
         async with self._pending_lock:
-            self.pending_updates.append(update)
+            if len(self.pending_updates) >= self.max_pending_updates:
+                dropped_due_to_backpressure = True
+            else:
+                self.pending_updates.append(update)
+
+        if dropped_due_to_backpressure:
+            logger.warning(
+                f"Dropping update from {message.sender_id}: pending queue full "
+                f"({self.max_pending_updates})"
+            )
+            self._emit_event(
+                "model_rejected_backpressure",
+                {
+                    "node_id": self.peer_id,
+                    "peer_id": message.sender_id,
+                    "round": message.round_number,
+                    "max_pending_updates": self.max_pending_updates,
+                },
+            )
+            return
 
         self._emit_event(
             "model_received",
@@ -463,6 +570,7 @@ class ModelAggregator:
                 model_version=self.model_version,
             )
         )
+        self.consensus_tracker.record_local_checkpoint(self.current_round)
 
         if self.broadcast_callback:
             checkpoint_msg = CheckpointAnnounceMessage.create(
@@ -496,22 +604,17 @@ class ModelAggregator:
         if hasattr(self.aggregator, 'get_training_config_overrides'):
             overrides = self.aggregator.get_training_config_overrides()
             if overrides:
-                from quinkgl.models.base import TrainingConfig
-                training_config = TrainingConfig(
-                    epochs=self.training_config.epochs,
-                    batch_size=self.training_config.batch_size,
-                    learning_rate=self.training_config.learning_rate,
-                    verbose=self.training_config.verbose,
-                    on_epoch_end=self.training_config.on_epoch_end,
-                    loss_fn=self.training_config.loss_fn,
-                    optimizer=self.training_config.optimizer,
-                    optimizer_kwargs=self.training_config.optimizer_kwargs,
-                    grad_clip_norm=self.training_config.grad_clip_norm,
-                    proximal_coefficient=overrides.get("proximal_coefficient"),
-                    global_weights=overrides.get("global_weights"),
-                )
+                allowed_override_keys = TrainingConfig.__dataclass_fields__.keys()
+                filtered_overrides = {
+                    key: value
+                    for key, value in overrides.items()
+                    if key in allowed_override_keys
+                }
+                if filtered_overrides:
+                    training_config = replace(self.training_config, **filtered_overrides)
 
-        result = await self.model.train(data, training_config)
+        async with self._model_lock:
+            result = await self.model.train(data, training_config)
 
         # Store result for sample_count in aggregation
         self._last_training_result = result
@@ -532,7 +635,7 @@ class ModelAggregator:
         if self.metrics_callback:
             self.metrics_callback(loss=loss, accuracy=acc, round_num=self.current_round)
 
-        # MCP hook: training complete
+        # Lifecycle hook: training complete
         await self._execute_hooks("on_training_complete", result)
         self._emit_event(
             "training_completed",
@@ -555,12 +658,7 @@ class ModelAggregator:
         ``consecutive_errors`` (A2 §2.5).  All targets are dispatched
         via ``asyncio.gather`` for parallelism.
         """
-        from quinkgl.models.base import PersonalizedModelWrapper
-
-        if isinstance(self.model, PersonalizedModelWrapper):
-            weights = self.model.get_backbone_weights()
-        else:
-            weights = self.model.get_weights()
+        weights = await self._get_shared_model_weights_snapshot()
 
         await self._execute_hooks("before_send", weights)
 
@@ -709,11 +807,7 @@ class ModelAggregator:
                     else self.training_config.batch_size
                 )
 
-            from quinkgl.models.base import PersonalizedModelWrapper as _PMW
-            if isinstance(self.model, _PMW):
-                own_weights = self.model.get_backbone_weights()
-            else:
-                own_weights = self.model.get_weights()
+            own_weights = await self._get_shared_model_weights_snapshot()
 
             own_update = ModelUpdate(
                 peer_id=self.peer_id,
@@ -726,32 +820,28 @@ class ModelAggregator:
 
             try:
                 aggregated = await self.aggregator.aggregate(all_updates)
-            except Exception:
+            except Exception as e:
                 # Task 1a+1b: re-insert the drained batch under lock so updates
                 # are not silently lost when aggregation fails.
                 async with self._pending_lock:
                     self.pending_updates[:0] = batch
+                self._emit_event(
+                    "aggregation_failed",
+                    {
+                        "node_id": self.peer_id,
+                        "round": self.current_round,
+                        "peer_ids": [u.peer_id for u in all_updates],
+                        "pending_updates_restored": len(batch),
+                        "error_type": e.__class__.__name__,
+                        "error": str(e),
+                    },
+                )
                 raise
 
             await self._execute_hooks("after_aggregate", aggregated)
 
             # Update model with aggregated weights
-            from quinkgl.models.base import PersonalizedModelWrapper, APFLMixin
-
-            if isinstance(self.model, PersonalizedModelWrapper):
-                self.model.set_backbone_weights(aggregated.weights)
-            else:
-                self.model.set_weights(aggregated.weights)
-
-            # APFL adaptive mixing: blend local + global weights
-            if isinstance(self.model, PersonalizedModelWrapper) and isinstance(self.model, APFLMixin):
-                local_weights = self.model.get_head_weights()
-                global_weights = aggregated.weights
-                mixed = self.model.compute_personalized_weights(
-                    local_weights=local_weights,
-                    global_weights=global_weights,
-                )
-                self.model.set_backbone_weights(mixed)
+            await self._apply_aggregated_weights(aggregated.weights)
 
             self._aggregation_event.clear()
 
@@ -768,7 +858,7 @@ class ModelAggregator:
             f"(total_samples={aggregated.total_samples})"
         )
 
-        # MCP hook: aggregation complete
+        # Lifecycle hook: aggregation complete
         await self._execute_hooks("on_aggregation_complete", aggregated)
 
         # Quality assessment: compute peer similarity
@@ -989,10 +1079,7 @@ class ModelAggregator:
                                 )
                                 # evaluate() is synchronous; run in executor so we don't
                                 # block the event loop during GPU/CPU-bound inference.
-                                loop = asyncio.get_running_loop()
-                                eval_metrics = await loop.run_in_executor(
-                                    None, lambda: self.model.evaluate(eval_data)
-                                )
+                                eval_metrics = await self._evaluate_model(eval_data)
                                 checkpoint_loss = float(eval_metrics.get("loss", loss))
                                 checkpoint_acc = float(eval_metrics.get("accuracy", acc))
                                 logger.debug(
@@ -1095,10 +1182,11 @@ class ModelAggregator:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
 
-    def stop(self):
-        """Stop the gossip learning loop."""
+    async def stop(self):
+        """Stop the gossip learning loop and await background task cleanup."""
         self.running = False
         logger.info("Stopping continuous gossip learning loop")
+        await self._cancel_background_tasks()
 
 
 # Backward compatibility alias (deprecated - use ModelAggregator instead)

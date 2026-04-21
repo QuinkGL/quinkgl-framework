@@ -32,7 +32,29 @@ class Krum(AggregationStrategy):
             **kwargs: Additional configuration parameters
         """
         super().__init__(**kwargs)
+        if isinstance(num_byzantines, bool) or not isinstance(num_byzantines, int) or num_byzantines < 0:
+            raise ValueError("num_byzantines must be a non-negative integer")
         self.num_byzantines = num_byzantines
+
+    def _validate_krum_requirements(self, updates: List[ModelUpdate], strategy_name: str) -> int:
+        n = len(updates)
+        min_required = 2 * self.num_byzantines + 3
+        if n < min_required:
+            raise ValueError(
+                f"{strategy_name} requires n >= 2*f + 3 updates "
+                f"(n={n}, f={self.num_byzantines})"
+            )
+        return n
+
+    def _compute_scores(self, distances: np.ndarray) -> List[float]:
+        n = len(distances)
+        n_closest = n - self.num_byzantines - 2
+        scores = []
+        for i in range(n):
+            neighbor_distances = np.delete(distances[i], i)
+            sorted_dist = np.sort(neighbor_distances)
+            scores.append(float(np.sum(sorted_dist[:n_closest])))
+        return scores
 
     async def aggregate(
         self,
@@ -43,23 +65,13 @@ class Krum(AggregationStrategy):
         """
         self._validate_updates(updates)
 
-        n = len(updates)
-        if n <= 2 * self.num_byzantines:
-            raise ValueError(
-                f"Krum requires n > 2*f updates (n={n}, f={self.num_byzantines})"
-            )
+        self._validate_krum_requirements(updates, "Krum")
 
         # Compute distances between all pairs of updates
         distances = self._compute_distances(updates)
 
-        # Compute scores (sum of smallest n-2*f-1 distances for each update)
-        n_closest = n - 2 * self.num_byzantines - 1
-        scores = []
-        for i in range(n):
-            # Sort distances from update i to all others
-            sorted_dist = np.sort(distances[i])
-            # Sum of n-2*f-1 smallest distances
-            scores.append(np.sum(sorted_dist[:n_closest]))
+        # Compute scores (sum of smallest n-f-2 distances to other updates)
+        scores = self._compute_scores(distances)
 
         # Select update with minimum score
         selected_idx = int(np.argmin(scores))
@@ -127,33 +139,26 @@ class MultiKrum(Krum):
         """
         self._validate_updates(updates)
 
-        n = len(updates)
-        if n <= 2 * self.num_byzantines:
-            raise ValueError(
-                f"MultiKrum requires n > 2*f updates (n={n}, f={self.num_byzantines})"
-            )
+        n = self._validate_krum_requirements(updates, "MultiKrum")
 
         # Compute distances
         distances = self._compute_distances(updates)
 
         # Compute scores
-        n_closest = n - 2 * self.num_byzantines - 1
-        scores = []
-        for i in range(n):
-            sorted_dist = np.sort(distances[i])
-            scores.append(np.sum(sorted_dist[:n_closest]))
+        scores = self._compute_scores(distances)
 
         # Select n-2*f updates with minimum scores
         num_selected = n - 2 * self.num_byzantines
         selected_indices = np.argsort(scores)[:num_selected].tolist()
         selected_updates = [updates[i] for i in selected_indices]
 
-        # Average the selected updates
-        fedavg = FedAvg()
+        # Average the selected updates uniformly, matching canonical MultiKrum.
+        fedavg = FedAvg(weight_by="uniform")
         result = await fedavg.aggregate(selected_updates)
 
         result.metadata["aggregation_method"] = "multikrum"
         result.metadata["num_byzantines"] = self.num_byzantines
         result.metadata["selected_peers"] = [u.peer_id for u in selected_updates]
+        result.metadata["weight_by"] = "uniform"
 
         return result

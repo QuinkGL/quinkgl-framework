@@ -79,6 +79,7 @@ def _validate_bucket_spec(
 
 @dataclass
 class CollaborationPolicy:
+    version: int = 1
     mode: str = "personalized"
     exploration_initial: float = 0.8
     exploration_decay: float = 0.95
@@ -87,9 +88,14 @@ class CollaborationPolicy:
     edge_decay_factor: float = 0.95
     eviction_min_weight: float = 0.05
     cold_start_rounds: int = 3
+    affinity_label_w: float = 0.4
+    affinity_feature_w: float = 0.3
+    affinity_gradient_w: float = 0.15
+    affinity_history_w: float = 0.15
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "version": self.version,
             "mode": self.mode,
             "exploration_initial": self.exploration_initial,
             "exploration_decay": self.exploration_decay,
@@ -98,6 +104,10 @@ class CollaborationPolicy:
             "edge_decay_factor": self.edge_decay_factor,
             "eviction_min_weight": self.eviction_min_weight,
             "cold_start_rounds": self.cold_start_rounds,
+            "affinity_label_w": self.affinity_label_w,
+            "affinity_feature_w": self.affinity_feature_w,
+            "affinity_gradient_w": self.affinity_gradient_w,
+            "affinity_history_w": self.affinity_history_w,
         }
 
     @classmethod
@@ -108,6 +118,7 @@ class CollaborationPolicy:
     ) -> "CollaborationPolicy":
         _ensure_dict(data, "CollaborationPolicy")
         allowed = {
+            "version",
             "mode",
             "exploration_initial",
             "exploration_decay",
@@ -116,11 +127,16 @@ class CollaborationPolicy:
             "edge_decay_factor",
             "eviction_min_weight",
             "cold_start_rounds",
+            "affinity_label_w",
+            "affinity_feature_w",
+            "affinity_gradient_w",
+            "affinity_history_w",
         }
         if strict:
             _check_allowed_keys(data, allowed, "CollaborationPolicy")
             _check_required_keys(data, allowed, "CollaborationPolicy")
         return cls(
+            version=data.get("version", 1),
             mode=data.get("mode", "personalized"),
             exploration_initial=data.get("exploration_initial", 0.8),
             exploration_decay=data.get("exploration_decay", 0.95),
@@ -129,6 +145,10 @@ class CollaborationPolicy:
             edge_decay_factor=data.get("edge_decay_factor", 0.95),
             eviction_min_weight=data.get("eviction_min_weight", 0.05),
             cold_start_rounds=data.get("cold_start_rounds", 3),
+            affinity_label_w=data.get("affinity_label_w", 0.4),
+            affinity_feature_w=data.get("affinity_feature_w", 0.3),
+            affinity_gradient_w=data.get("affinity_gradient_w", 0.15),
+            affinity_history_w=data.get("affinity_history_w", 0.15),
         )
 
     def validate(self) -> None:
@@ -138,6 +158,20 @@ class CollaborationPolicy:
         _in_01(self.ema_alpha, "ema_alpha")
         _in_01(self.edge_decay_factor, "edge_decay_factor")
         _in_01(self.eviction_min_weight, "eviction_min_weight")
+        _in_01(self.affinity_label_w, "affinity_label_w")
+        _in_01(self.affinity_feature_w, "affinity_feature_w")
+        _in_01(self.affinity_gradient_w, "affinity_gradient_w")
+        _in_01(self.affinity_history_w, "affinity_history_w")
+        total_affinity = (
+            self.affinity_label_w +
+            self.affinity_feature_w +
+            self.affinity_gradient_w +
+            self.affinity_history_w
+        )
+        if not (0.9 <= total_affinity <= 1.1):  # Allow small floating-point tolerance
+            raise ValueError(
+                f"Affinity weights must sum to approximately 1.0, got {total_affinity}"
+            )
         if self.exploration_min > self.exploration_initial:
             raise ValueError(
                 f"exploration_min ({self.exploration_min}) must be <= "
@@ -151,6 +185,7 @@ class CollaborationPolicy:
 
 @dataclass
 class PersonalizationPolicy:
+    version: int = 1
     model_split: str = "auto"
     apfl_enabled: bool = True
     apfl_initial_alpha: float = 0.5
@@ -158,6 +193,7 @@ class PersonalizationPolicy:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "version": self.version,
             "model_split": self.model_split,
             "apfl_enabled": self.apfl_enabled,
             "apfl_initial_alpha": self.apfl_initial_alpha,
@@ -172,6 +208,7 @@ class PersonalizationPolicy:
     ) -> "PersonalizationPolicy":
         _ensure_dict(data, "PersonalizationPolicy")
         allowed = {
+            "version",
             "model_split",
             "apfl_enabled",
             "apfl_initial_alpha",
@@ -181,6 +218,7 @@ class PersonalizationPolicy:
             _check_allowed_keys(data, allowed, "PersonalizationPolicy")
             _check_required_keys(data, allowed, "PersonalizationPolicy")
         return cls(
+            version=data.get("version", 1),
             model_split=data.get("model_split", "auto"),
             apfl_enabled=data.get("apfl_enabled", True),
             apfl_initial_alpha=data.get("apfl_initial_alpha", 0.5),
@@ -195,12 +233,14 @@ class PersonalizationPolicy:
 
 @dataclass
 class PrototypePolicy:
+    version: int = 1
     enabled: bool = False
     alignment_weight: float = 0.1
     fedpac_enabled: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "version": self.version,
             "enabled": self.enabled,
             "alignment_weight": self.alignment_weight,
             "fedpac_enabled": self.fedpac_enabled,
@@ -213,11 +253,12 @@ class PrototypePolicy:
         strict: bool = True,
     ) -> "PrototypePolicy":
         _ensure_dict(data, "PrototypePolicy")
-        allowed = {"enabled", "alignment_weight", "fedpac_enabled"}
+        allowed = {"version", "enabled", "alignment_weight", "fedpac_enabled"}
         if strict:
             _check_allowed_keys(data, allowed, "PrototypePolicy")
             _check_required_keys(data, allowed, "PrototypePolicy")
         return cls(
+            version=data.get("version", 1),
             enabled=data.get("enabled", False),
             alignment_weight=data.get("alignment_weight", 0.1),
             fedpac_enabled=data.get("fedpac_enabled", False),
@@ -491,3 +532,104 @@ class DataPolicy:
 def _in_01(value: float, name: str) -> None:
     if not (0.0 <= value <= 1.0):
         raise ValueError(f"{name} must be in [0, 1], got {value}")
+
+
+@dataclass
+class SwarmManifest:
+    """Complete swarm manifest binding all collaboration policies.
+
+    This is the canonical commitment that peers use to derive community IDs.
+    Any difference in any field produces a different manifest hash and thus
+    a different overlay network.
+    """
+    schema_version: int = MANIFEST_SCHEMA_VERSION
+    model_arch_fingerprint: str = ""  # Hash of model architecture
+    data_schema_hash: str = ""  # Hash of data schema
+    aggregation_name: str = "FedAvg"
+    aggregation_params: Dict[str, Any] = field(default_factory=dict)
+    topology_name: str = "Random"
+    topology_params: Dict[str, Any] = field(default_factory=dict)
+    compression_enabled: bool = False
+    compression_params: Dict[str, Any] = field(default_factory=dict)
+    data_policy: DataPolicy = field(default_factory=DataPolicy)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "model_arch_fingerprint": self.model_arch_fingerprint,
+            "data_schema_hash": self.data_schema_hash,
+            "aggregation": {
+                "name": self.aggregation_name,
+                "params": self.aggregation_params,
+            },
+            "topology": {
+                "name": self.topology_name,
+                "params": self.topology_params,
+            },
+            "compression": {
+                "enabled": self.compression_enabled,
+                "params": self.compression_params,
+            },
+            "data_policy": self.data_policy.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], strict: bool = True) -> "SwarmManifest":
+        _ensure_dict(data, "SwarmManifest")
+        allowed = {
+            "schema_version",
+            "model_arch_fingerprint",
+            "data_schema_hash",
+            "aggregation",
+            "topology",
+            "compression",
+            "data_policy",
+        }
+        if strict:
+            _check_allowed_keys(data, allowed, "SwarmManifest")
+            _check_required_keys(data, allowed, "SwarmManifest")
+            _require_schema_version(data, MANIFEST_SCHEMA_VERSION, "SwarmManifest")
+
+        agg_data = data.get("aggregation", {})
+        topo_data = data.get("topology", {})
+        comp_data = data.get("compression", {})
+        policy_data = data.get("data_policy", DataPolicy().to_dict())
+
+        return cls(
+            schema_version=data.get("schema_version", MANIFEST_SCHEMA_VERSION),
+            model_arch_fingerprint=data.get("model_arch_fingerprint", ""),
+            data_schema_hash=data.get("data_schema_hash", ""),
+            aggregation_name=agg_data.get("name", "FedAvg"),
+            aggregation_params=agg_data.get("params", {}),
+            topology_name=topo_data.get("name", "Random"),
+            topology_params=topo_data.get("params", {}),
+            compression_enabled=comp_data.get("enabled", False),
+            compression_params=comp_data.get("params", {}),
+            data_policy=DataPolicy.from_dict(policy_data, strict=strict),
+        )
+
+    def validate(self) -> None:
+        """Validate all manifest fields."""
+        if self.schema_version != MANIFEST_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version must be {MANIFEST_SCHEMA_VERSION}, got {self.schema_version}"
+            )
+        if not self.model_arch_fingerprint:
+            raise ValueError("model_arch_fingerprint must be non-empty")
+        if not self.data_schema_hash:
+            raise ValueError("data_schema_hash must be non-empty")
+        self.data_policy.validate()
+
+    def canonical_bytes(self) -> bytes:
+        """Deterministic serialization suitable for hashing."""
+        return json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+
+    def manifest_hash(self) -> str:
+        """SHA-256 of the canonical manifest bytes, hex-encoded."""
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
