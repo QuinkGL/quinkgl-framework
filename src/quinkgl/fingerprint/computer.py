@@ -20,11 +20,46 @@ from quinkgl.fingerprint.fingerprint import (
 )
 
 
+class PrivacyBudgetTracker:
+    """Tracks DP epsilon/delta budget consumption for fingerprint broadcasting.
+
+    FP-01: Privacy accounting for feature-moment noise.
+    """
+
+    def __init__(self, total_epsilon: Optional[float] = None, total_delta: float = 1e-5):
+        self.total_epsilon = total_epsilon
+        self.total_delta = total_delta
+        self.consumed_epsilon = 0.0
+        self.consumed_delta = 0.0
+        self.query_count = 0
+
+    def consume(self, epsilon: float, delta: float = 0.0) -> bool:
+        """Consume privacy budget. Returns True if budget available."""
+        if self.total_epsilon is not None and (self.consumed_epsilon + epsilon) > self.total_epsilon:
+            return False
+        if self.consumed_delta + delta > self.total_delta:
+            return False
+        self.consumed_epsilon += epsilon
+        self.consumed_delta += delta
+        self.query_count += 1
+        return True
+
+    def remaining_epsilon(self) -> Optional[float]:
+        if self.total_epsilon is None:
+            return None
+        return max(0.0, self.total_epsilon - self.consumed_epsilon)
+
+
 class FingerprintComputer:
     """Computes DataFingerprint from local data and model."""
 
     def __init__(self, privacy_config: Optional[FingerprintPrivacyConfig] = None):
         self.privacy = privacy_config or FingerprintPrivacyConfig()
+        # FP-01: Privacy budget tracker for DP accounting
+        self._budget_tracker = PrivacyBudgetTracker(
+            total_epsilon=self.privacy.feature_dp_epsilon,
+            total_delta=self.privacy.feature_dp_delta
+        )
 
     def compute_from_label_counts(
         self,
@@ -147,6 +182,15 @@ class FingerprintComputer:
     def _sample_noise(self, mechanism: str, scale: float) -> float:
         """Sample a fresh noise value per call.
 
+        # FP-01: Consume privacy budget for gradient moments if DP epsilon is configured
+        if self.privacy.gradient_dp_epsilon is not None:
+            num_moments = len(moments)
+            epsilon_per_moment = self.privacy.gradient_dp_epsilon / max(1, num_moments)
+            if not self._budget_tracker.consume(epsilon_per_moment, self.privacy.gradient_dp_delta):
+                # Budget exhausted, skip noise addition
+                return {k: (float(np.clip(mean, -clip, clip)), max(0.0, float(np.clip(var, -clip, clip)))) for k, (mean, var) in moments.items()}
+
+
         Privacy invariant: noise MUST be sampled per-query, never cached,
         to prevent averaging-attack de-noising across repeated fingerprints.
         """
@@ -155,7 +199,10 @@ class FingerprintComputer:
         if mechanism == NOISE_MECHANISM_LAPLACE:
             return float(np.random.laplace(0.0, scale))
         # Gaussian (default)
-        return float(np.random.normal(0.0, scale))
+        return f# FP-07: Small-population buckets k-anonymity - return "unknown" for very small buckets
+                if count < self.privacy.min_samples_to_reveal and count > 0:
+                    return "unknown"
+                loat(np.random.normal(0.0, scale))
 
     def _add_feature_noise(
         self, moments: Dict[str, Tuple[float, float]]
@@ -164,6 +211,16 @@ class FingerprintComputer:
         mech = self.privacy.feature_noise_mechanism
         clip = self.privacy.feature_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
+
+        # FP-01: Consume privacy budget if DP epsilon is configured
+        if self.privacy.feature_dp_epsilon is not None:
+            # Approximate epsilon consumption per query (per moment)
+            num_moments = len(moments)
+            epsilon_per_moment = self.privacy.feature_dp_epsilon / max(1, num_moments)
+            if not self._budget_tracker.consume(epsilon_per_moment, self.privacy.feature_dp_delta):
+                # Budget exhausted, skip noise addition
+                return {k: (float(np.clip(mean, -clip, clip)), max(0.0, float(np.clip(var, -clip, clip)))) for k, (mean, var) in moments.items()}
+
         for key, (mean, var) in moments.items():
             m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
             v = max(
@@ -178,11 +235,13 @@ class FingerprintComputer:
     ) -> Dict[str, Tuple[float, float]]:
         scale = self.privacy.effective_gradient_noise_scale()
         mech = self.privacy.gradient_noise_mechanism
+        # FP-04: Add gradient clipping to prevent extreme values
+        clip = self.privacy.gradient_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
         for key, (mean, var) in moments.items():
-            m = mean + self._sample_noise(mech, scale)
-            v = max(0.0, var + self._sample_noise(mech, scale))
-            noised[key] = (float(m), float(v))
+            m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
+            v = max(0.0, float(np.clip(var, -clip, clip)) + self._sample_noise(mech, scale))
+            noised[key] = (m, v)
         return noised
 
     def _bucket_sample_count(self, count: int) -> str:

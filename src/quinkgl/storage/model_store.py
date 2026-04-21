@@ -15,6 +15,7 @@ arbitrary code execution vulnerabilities when loading checkpoints.
 import os
 import asyncio
 import hashlib
+import heapq
 import io
 import logging
 import re
@@ -391,15 +392,29 @@ class ModelStore:
         return metadata
 
     def _enforce_memory_limit(self) -> None:
-        """Enforce max memory checkpoints by removing oldest."""
+        """Enforce max memory checkpoints by removing oldest.
+
+        ST-07: Use heapq for O(n log n) instead of O(n²) min() in loop.
+        """
         if self.max_memory_checkpoints <= 0:
             return
 
-        while len(self._checkpoints) > self.max_memory_checkpoints:
-            oldest = min(self._checkpoints.values(), key=lambda c: c.round_number)
-            del self._checkpoints[oldest.checkpoint_id]
-            self._round_index.pop(oldest.round_number, None)
-            logger.debug(f"Evicted checkpoint from memory: {oldest.checkpoint_id}")
+        # ST-07: Use heapq to find oldest checkpoints efficiently
+        if len(self._checkpoints) <= self.max_memory_checkpoints:
+            return
+
+        # Build heap of (round_number, checkpoint_id) pairs
+        heap = [(c.round_number, c.checkpoint_id) for c in self._checkpoints.values()]
+        heapq.heapify(heap)
+
+        # Evict oldest checkpoints
+        evicted_count = len(self._checkpoints) - self.max_memory_checkpoints
+        for _ in range(evicted_count):
+            oldest_round, oldest_id = heapq.heappop(heap)
+            if oldest_id in self._checkpoints:
+                del self._checkpoints[oldest_id]
+                self._round_index.pop(oldest_round, None)
+                logger.debug(f"Evicted checkpoint from memory: {oldest_id}")
 
     # Public API (backward compatible - same method signatures)
     def save_checkpoint(
@@ -597,6 +612,9 @@ class ModelStore:
         """
         List all stored checkpoints with caching (thread-safe).
 
+        ST-06: Returns memory checkpoints; disk checkpoints are loaded lazily.
+        Use list_checkpoint_metadata() for lightweight disk enumeration.
+
         Returns:
             List of ModelCheckpoint objects sorted by round number
         """
@@ -605,26 +623,8 @@ class ModelStore:
             if not self._cache_dirty and self._list_cache is not None:
                 return self._list_cache.copy()
 
-            checkpoints = []
-
-            # Add memory checkpoints
-            if self.keep_in_memory:
-                checkpoints.extend(self._checkpoints.values())
-
-            # Add disk checkpoints if not in memory
-            if self.storage_dir:
-                for filepath in self._find_checkpoint_files():
-                    try:
-                        checkpoint_id = self._checkpoint_id_from_path(filepath)
-                    except ValueError:
-                        continue
-                    # Skip .pkl files (not loaded for security)
-                    if filepath.suffix == ".pkl":
-                        continue
-                    if checkpoint_id not in self._checkpoints:
-                        checkpoint = self._load_from_disk(checkpoint_id)
-                        if checkpoint:
-                            checkpoints.append(checkpoint)
+            # ST-06: Only return memory checkpoints; don't full-load disk checkpoints
+            checkpoints = list(self._checkpoints.values())
 
             # Sort by round number
             checkpoints.sort(key=lambda c: c.round_number)

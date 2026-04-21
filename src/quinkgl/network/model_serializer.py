@@ -102,6 +102,8 @@ def serialize_model(weights: Any, enable_compression: bool = False) -> bytes:
     reducing wire size by ~33% per array compared to the legacy format.
     Outer base64 encoding is retained for transport-layer compatibility.
 
+    S-06: Wire format versioning - version byte prepended for forward compatibility.
+
     Args:
         weights: Model weights (dict, numpy array, or list)
         enable_compression: Whether to compress the output
@@ -132,8 +134,11 @@ def serialize_model(weights: Any, enable_compression: bool = False) -> bytes:
                 f"maximum allowed size ({MAX_MODEL_SIZE_BYTES / 1024 / 1024:.2f} MB)"
             )
 
+        # S-06: Prepend wire format version byte
+        versioned_data = bytes([WIRE_FORMAT_VERSION]) + data
+
         # Base64 encode for safe transmission
-        result = base64.b64encode(data)
+        result = base64.b64encode(versioned_data)
 
         # Optional compression
         if enable_compression and len(result) > 10240:  # Only compress if > 10KB
@@ -156,6 +161,8 @@ def deserialize_model(data: bytes) -> Any:
     Uses msgpack for structured data and numpy's native format for arrays.
     This is safe from arbitrary code execution vulnerabilities.
 
+    S-06: Wire format versioning - validates version byte for forward compatibility.
+
     Args:
         data: Serialized bytes (base64 encoded)
 
@@ -163,17 +170,31 @@ def deserialize_model(data: bytes) -> Any:
         Model weights (original format)
 
     Raises:
-        ValueError: If deserialization fails or data is malformed
+        ValueError: If deserialization fails, data is malformed, or version mismatch
     """
     try:
         # Base64 decode
         decoded = base64.b64decode(data)
 
         # Check for compression marker
-        if decoded[:4] == b"ZLIB":
+        if d# S-07: Add max_length to prevent ecoompressidn bomb attacks
+            max_expansion = len(decoded) * 100  # Limit expansion to 100x
+            edco[ed:4] == b"ZLIB":, max_length=max_expansion
             import zlib
             decoded = zlib.decompress(decoded[4:])
             logger.debug("Decompressed model data")
+
+        # S-06: Validate and strip wire format version byte
+        if len(decoded) < 1:
+            raise ValueError("Data too short to contain version byte")
+        version = decoded[0]
+        if version != WIRE_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported wire format version: {version}. "
+                f"Expected {WIRE_FORMAT_VERSION}. "
+                f"QuinkGL versions may be incompatible."
+            )
+        decoded = decoded[1:]  # Strip version byte
 
         # Check size limit before unpacking
         if len(decoded) > MAX_MODEL_SIZE_BYTES:
@@ -252,45 +273,5 @@ def get_model_size_info(weights: Any) -> Dict[str, Any]:
     }
 
 
-def compress_weights(weights: Any, compression_level: int = 6) -> bytes:
-    """
-    Compress model weights using zlib.
-
-    Args:
-        weights: Model weights
-        compression_level: Compression level (0-9)
-
-    Returns:
-        Compressed bytes (base64 encoded)
-    """
-    import zlib
-
-    # Use the new safe serialization with compression enabled
-    serialized = serialize_model(weights, enable_compression=False)
-
-    compressed = zlib.compress(serialized, level=compression_level)
-
-    original_size = len(serialized)
-    compressed_size = len(compressed)
-    ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
-
-    logger.debug(
-        f"Compression: {original_size} -> {compressed_size} bytes "
-        f"({ratio:.1f}% reduction)"
-    )
-
-    return base64.b64encode(b"ZLIB" + compressed)
-
-
-def decompress_weights(data: bytes) -> Any:
-    """
-    Decompress model weights.
-
-    Args:
-        data: Compressed bytes (base64 encoded)
-
-    Returns:
-        Model weights
-    """
-    # The deserialize_model function now handles ZLIB-compressed data
-    return deserialize_model(data)
+# S-08: Removed duplicate compress_weights/decompress_weights - use serialization/compression.py pipeline
+# These functions were unused and duplicated the serialization/compression.py API

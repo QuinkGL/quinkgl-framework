@@ -132,6 +132,37 @@ class ErrorFeedbackState:
         self._residuals.clear()
         self._round = 0
 
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize state to dict for persistence (S-02).
+
+        Returns:
+            Dict with residuals (as lists), round, and config.
+        """
+        return {
+            "residuals": {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in self._residuals.items()},
+            "round": self._round,
+            "config": {
+                "enabled": self.config.enabled,
+                "momentum": self.config.momentum,
+                "max_residual_norm": self.config.max_residual_norm,
+            }
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load state from dict for persistence (S-02).
+
+        Args:
+            state_dict: Dict with residuals (as lists), round, and config.
+        """
+        self._residuals = {k: np.array(v, dtype=np.float64) for k, v in state_dict.get("residuals", {}).items()}
+        self._round = state_dict.get("round", 0)
+        config_data = state_dict.get("config", {})
+        self.config = ErrorFeedbackConfig(
+            enabled=config_data.get("enabled", True),
+            momentum=config_data.get("momentum", 0.0),
+            max_residual_norm=config_data.get("max_residual_norm", None),
+        )
+
     @property
     def total_residual_norm(self) -> float:
         """ℓ₂-norm of the concatenated residual buffer (global, cross-tensor)."""

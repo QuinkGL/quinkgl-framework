@@ -60,6 +60,34 @@ class CollaborationHistory:
         self._history: Dict[str, CollaborationEdge] = {}
         self._max_peers = max_peers
 
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize state for persistence (TOP-07)."""
+        return {
+            "history": {
+                pid: {
+                    "weight": edge.weight,
+                    "rounds_since_update": edge.rounds_since_update,
+                    "total_rounds": edge.total_rounds,
+                    "successful_rounds": edge.successful_rounds,
+                }
+                for pid, edge in self._history.items()
+            },
+            "max_peers": self._max_peers,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load state from dict for persistence (TOP-07)."""
+        history_dict = state_dict.get("history", {})
+        self._history = {}
+        for pid, edge_data in history_dict.items():
+            edge = CollaborationEdge()
+            edge.weight = edge_data.get("weight", 0.0)
+            edge.rounds_since_update = edge_data.get("rounds_since_update", 0)
+            edge.total_rounds = edge_data.get("total_rounds", 0)
+            edge.successful_rounds = edge_data.get("successful_rounds", 0)
+            self._history[pid] = edge
+        self._max_peers = state_dict.get("max_peers", 100)
+
     def get_edge(self, peer_id: str) -> Optional[CollaborationEdge]:
         return self._history.get(peer_id)
 
@@ -169,6 +197,8 @@ class AffinityTopology(TopologyStrategy):
         self.affinity_weights = affinity_weights or AffinityWeights()
         self.history = CollaborationHistory()
         self._round_count = 0
+        # TOP-12: Add lock for history mutations
+        self._lock = asyncio.Lock()
 
     @property
     def cold_start_phase(self) -> str:
@@ -177,6 +207,21 @@ class AffinityTopology(TopologyStrategy):
         if self._round_count <= self.cold_start_rounds * 3:
             return "learning"
         return "exploiting"
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize state for persistence (TOP-07)."""
+        return {
+            "round_count": self._round_count,
+            "exploration_ratio": self.exploration_ratio,
+            "history": self.history.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load state from dict for persistence (TOP-07)."""
+        self._round_count = state_dict.get("round_count", 0)
+        self.exploration_ratio = state_dict.get("exploration_ratio", self.exploration_initial)
+        history_dict = state_dict.get("history", {})
+        self.history.load_state_dict(history_dict)
 
     async def select_targets(
         self, context: SelectionContext, count: int = 3
