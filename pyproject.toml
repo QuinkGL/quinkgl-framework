@@ -45,8 +45,10 @@ dependencies = [
     "uvicorn>=0.29,<1",
 ]
 
-[project.optional-dependencies]
+[project.scripts]
+quinkgl = "quinkgl.cli.__main__:main"
 
+[project.optional-dependencies]
 tensorflow = [
     "tensorflow>=2.12.0",
 ]
@@ -57,6 +59,12 @@ dev = [
     "flake8>=7,<8",
     "mypy>=1.8,<2",
 ]
+docs = [
+    "sphinx >=7.0",
+    "myst-parser >=2.0",
+    "sphinx-autodoc2 >=0.5",
+    "lychee-bin >=0.14; sys_platform != 'win32'",
+]
 all = [
     "quinkgl[tensorflow]",
 ]
@@ -65,6 +73,9 @@ all = [
 "Homepage" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework"
 "Bug Tracker" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework/issues"
 "Documentation" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework#readme"
+
+[tool.setuptools.package-data]
+"quinkgl.cli.templates" = ["**/*.tmpl"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -15,6 +15,7 @@ from quinkgl.manifest.schema import (
     SwarmManifest,
     TaskSpec,
 )
+from quinkgl.manifest.signing import keygen, sign_manifest, verify_manifest
 
 
 def check_compatibility(manifest: SwarmManifest) -> None:
@@ -67,6 +68,9 @@ __all__ = [
     "check_compatibility",
     "compute_arch_hash",
     "format_magnet",
+    "keygen",
     "load_manifest",
     "parse_magnet",
+    "sign_manifest",
+    "verify_manifest",
 ]

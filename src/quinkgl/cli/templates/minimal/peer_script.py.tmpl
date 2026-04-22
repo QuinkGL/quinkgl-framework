@@ -1,0 +1,39 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Peer script: model and data-loader builders.
+
+Generated for swarm {swarm_id_short} on {created_at}.
+Architecture hash: {arch_hash}
+Input shape: {input_shape}  Output shape: {output_shape}
+"""
+
+
+def build_model(manifest, **script_args):
+    """Build and return the model for this peer.
+
+    Args:
+        manifest: The SwarmManifest instance.
+        **script_args: Extra keyword arguments from the manifest script section.
+
+    Raises:
+        NotImplementedError: Until the peer implements its model.
+    """
+    raise NotImplementedError(
+        "build_model() is not yet implemented. "
+        "Define your architecture here for manifest '{manifest_name}'."
+    )
+
+
+def build_loaders(manifest, **script_args):
+    """Build and return the train and validation data loaders.
+
+    Args:
+        manifest: The SwarmManifest instance.
+        **script_args: Extra keyword arguments from the manifest script section.
+
+    Raises:
+        NotImplementedError: Until the peer implements its loaders.
+    """
+    raise NotImplementedError(
+        "build_loaders() is not yet implemented. "
+        "Define your dataset / dataloader logic here for manifest '{manifest_name}'."
+    )

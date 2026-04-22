@@ -52,6 +52,9 @@ EXPECTED_TOPLEVEL = {
     "AffinityTopology",
     "SpectralAnalyzer",
     "SpectralReport",
+    "build_ring_adjacency",
+    "build_complete_adjacency",
+    "build_random_regular_adjacency",
     "PeerInfo",
     "SelectionContext",
     # Fingerprint

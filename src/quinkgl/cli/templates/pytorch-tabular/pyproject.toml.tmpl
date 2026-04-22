@@ -1,0 +1,26 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{project_name}"
+version = "0.1.0"
+description = "PyTorch-Tabular peer scaffolded by QuinkGL"
+requires-python = ">=3.10"
+dependencies = [
+    "quinkgl{quinkgl_pin}",
+    "pandas",
+    "scikit-learn",
+    "torch",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["peer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
