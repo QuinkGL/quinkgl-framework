@@ -91,6 +91,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     init_cmd.build_parser(sub)
 
+    # directory (publish / query / discover)
+    from . import directory_cmd
+
+    directory_cmd.build_parser(sub)
+
     return parser
 
 
@@ -114,6 +119,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "status": "status_cmd",
         "info": "info_cmd",
         "init": "init_cmd",
+        "publish": "directory_cmd",
+        "query": "directory_cmd",
+        "discover": "directory_cmd",
     }
 
     mod_name = dispatch.get(args.command)

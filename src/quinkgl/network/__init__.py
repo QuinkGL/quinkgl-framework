@@ -24,6 +24,11 @@ from quinkgl.network.directory import (
     sign_advertisement,
     verify_advertisement,
 )
+from quinkgl.network.auto_discovery import (
+    ManifestRegistry,
+    discover_and_join,
+    rank_candidates,
+)
 
 __all__ = [
     "IPv8Manager",
@@ -41,4 +46,7 @@ __all__ = [
     "SwarmDirectoryCommunity",
     "sign_advertisement",
     "verify_advertisement",
+    "ManifestRegistry",
+    "discover_and_join",
+    "rank_candidates",
 ]
