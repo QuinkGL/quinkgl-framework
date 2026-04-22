@@ -182,18 +182,27 @@ class DiscoveryAnnouncePayload(Payload):
 
     Peers announce their domain and schema to find compatible peers.
     Optionally includes a fingerprint JSON blob for affinity computation.
+
+    Spec §12.1 (Phase 1): carries a trailing ``manifest_id`` (hex
+    ``swarm_id`` or empty) so peers operating under an explicit manifest
+    can mutually identify swarm membership without relying solely on the
+    looser ``(domain, data_schema_hash)`` pair.  Old peers emit 5 fields;
+    new peers emit 6.  ``from_unpack_list`` accepts both shapes so that
+    cross-version gossip keeps working.
     """
     msg_id = 1
-    format_list = ['varlenH', 'varlenH', 'varlenH', 'varlenH', 'varlenH']
+    format_list = ['varlenH'] * 6
 
     def __init__(self, node_id: str, domain: str, data_schema_hash: str,
-                 model_version: str = "1.0.0", fingerprint_json: str = ""):
+                 model_version: str = "1.0.0", fingerprint_json: str = "",
+                 manifest_id: str = ""):
         super().__init__()
         self.node_id = node_id
         self.domain = domain
         self.data_schema_hash = data_schema_hash
         self.model_version = model_version
         self.fingerprint_json = fingerprint_json
+        self.manifest_id = manifest_id
 
     def to_pack_list(self):
         return [
@@ -202,20 +211,38 @@ class DiscoveryAnnouncePayload(Payload):
             ('varlenH', self.data_schema_hash.encode('utf-8')),
             ('varlenH', self.model_version.encode('utf-8')),
             ('varlenH', self.fingerprint_json.encode('utf-8')),
+            ('varlenH', self.manifest_id.encode('utf-8')),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
+        # Tolerate legacy 5-field payloads from v2.0.0 peers: the trailing
+        # ``manifest_id`` is simply absent and decoded as empty.
         fp_json = ""
+        manifest_id = ""
         if len(args) > 4:
             fp_json = args[4].decode('utf-8') if args[4] else ""
+        if len(args) > 5:
+            manifest_id = args[5].decode('utf-8') if args[5] else ""
         return cls(
             args[0].decode('utf-8'),
             args[1].decode('utf-8'),
             args[2].decode('utf-8'),
             args[3].decode('utf-8'),
             fp_json,
+            manifest_id,
         )
+
+
+def _manifest_id_blocks_peer(local_mid: str, remote_mid: str) -> bool:
+    """Pre-filter gate from spec §12.3.
+
+    Returns True iff the discovery announce MUST be rejected on a
+    manifest-id mismatch.  Both sides MUST advertise a non-empty
+    ``manifest_id`` AND the two values MUST differ — otherwise the
+    legacy ``(domain, data_schema_hash)`` filter runs as before.
+    """
+    return bool(local_mid) and bool(remote_mid) and local_mid != remote_mid
 
 
 class ModelUpdatePayload(Payload):
@@ -596,20 +623,37 @@ class PeerInfo:
         node_id: str,
         domain: str,
         data_schema_hash: str,
-        model_version: str = "1.0.0"
+        model_version: str = "1.0.0",
+        manifest_id: str = "",
     ):
         self.peer = peer
         self.node_id = node_id
         self.domain = domain
         self.data_schema_hash = data_schema_hash
         self.model_version = model_version
+        self.manifest_id = manifest_id
         self.last_seen = time.time()
 
-    def is_compatible(self, domain: str, data_schema_hash: str) -> bool:
-        """Check if peer is compatible (same domain and schema)."""
+    def is_compatible(
+        self,
+        domain: str,
+        data_schema_hash: str,
+        manifest_id: str = "",
+    ) -> bool:
+        """Check swarm compatibility (spec §12.2).
+
+        When both peers advertise a ``manifest_id``, the manifest
+        identity is authoritative — it supersedes the looser ``(domain,
+        data_schema_hash)`` legacy pair so two peers with different
+        cosmetic domains but the same signed manifest still find each
+        other.  If either side is manifest-less, the legacy pair is the
+        sole compatibility signal (cross-version fallback).
+        """
+        if manifest_id and self.manifest_id:
+            return self.manifest_id == manifest_id
         return (
-            self.domain == domain and
-            self.data_schema_hash == data_schema_hash
+            self.domain == domain
+            and self.data_schema_hash == data_schema_hash
         )
 
     def age(self) -> float:
@@ -655,6 +699,13 @@ class GossipLearningCommunity(Community):
         self.require_signature = require_signature
         self.last_seen_round_state_path = last_seen_round_state_path
         self.max_round_skip = max_round_skip
+        # Phase 1 (spec §12.3): manifest-first swarm identity.  ``manifest``
+        # is the attached :class:`SwarmManifest` (or None for legacy peers);
+        # ``manifest_hash`` is the hex ``swarm_id`` broadcast over the wire
+        # so peers can pre-filter cross-swarm discovery announces before the
+        # legacy (domain, data_schema_hash) gate runs.
+        self.manifest = None
+        self.manifest_hash = ""
         self.current_round_provider: Optional[Callable[[], int]] = None
 
         # B16 §4.5: Instance-level community_id (no class mutation)
@@ -869,6 +920,7 @@ class GossipLearningCommunity(Community):
             except Exception:
                 logger.debug("Could not serialize local fingerprint for announce")
 
+        local_mid = getattr(self, "manifest_hash", "") or ""
         for peer in self.get_peers():
             self.ez_send(peer, DiscoveryAnnouncePayload(
                 self.node_id,
@@ -876,6 +928,7 @@ class GossipLearningCommunity(Community):
                 self.data_schema_hash,
                 self.model_version,
                 fingerprint_json,
+                local_mid,
             ))
 
     async def _send_heartbeat(self):
@@ -978,6 +1031,33 @@ class GossipLearningCommunity(Community):
 
     @lazy_wrapper(DiscoveryAnnouncePayload)
     async def on_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
+        # Spec §12.3: honour the manifest-id pre-filter BEFORE the legacy
+        # (domain, data_schema_hash) gate so two peers with matching manifest
+        # hashes are never blocked on cosmetic domain differences, and two
+        # peers with different manifests never get through even if their
+        # domain/schema happen to align.
+        local_mid = getattr(self, "manifest_hash", "") or ""
+        remote_mid = getattr(payload, "manifest_id", "") or ""
+        if _manifest_id_blocks_peer(local_mid, remote_mid):
+            emitter = getattr(self, "event_emitter", None)
+            if emitter is not None:
+                try:
+                    emitter.emit(
+                        "security.discovery_manifest_mismatch",
+                        {
+                            "peer": payload.node_id,
+                            "local_manifest_id": local_mid,
+                            "remote_manifest_id": remote_mid,
+                        },
+                    )
+                except Exception:  # pragma: no cover — observer failures are non-fatal
+                    pass
+            logger.debug(
+                f"Dropping peer {payload.node_id}: manifest_id mismatch "
+                f"(local={local_mid[:8]}..., remote={remote_mid[:8]}...)"
+            )
+            return
+
         if payload.domain != self.domain or payload.data_schema_hash != self.data_schema_hash:
             logger.debug(
                 f"Incompatible peer: {payload.node_id} "
@@ -1011,7 +1091,8 @@ class GossipLearningCommunity(Community):
                 node_id=payload.node_id,
                 domain=payload.domain,
                 data_schema_hash=payload.data_schema_hash,
-                model_version=payload.model_version
+                model_version=payload.model_version,
+                manifest_id=remote_mid,
             )
             peer_info.data_fingerprint = fingerprint
             self.known_peers[payload.node_id] = peer_info

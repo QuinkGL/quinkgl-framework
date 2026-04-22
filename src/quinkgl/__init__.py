@@ -155,6 +155,8 @@ from quinkgl.manifest import (
     CollaborationPolicy,
     PersonalizationPolicy,
     PrototypePolicy,
+    SwarmManifest,
+    check_compatibility,
 )
 
 # =============================================================================
@@ -235,6 +237,8 @@ __all__ = [
     "CollaborationPolicy",
     "PersonalizationPolicy",
     "PrototypePolicy",
+    "SwarmManifest",
+    "check_compatibility",
 
     # Gossip
     "ModelAggregator",
