@@ -16,6 +16,14 @@ from quinkgl.network.ipv8_manager import IPv8Manager
 from quinkgl.network.gossip_community import GossipLearningCommunity, PeerInfo, generate_community_id
 from quinkgl.network.gossip_node import GossipNode, ConnectionMode
 from quinkgl.network.model_serializer import serialize_model, deserialize_model, get_model_size_info
+from quinkgl.network.directory import (
+    DIRECTORY_COMMUNITY_ID,
+    SwarmAdvertisement,
+    SwarmAdvertisementPayload,
+    SwarmDirectoryCommunity,
+    sign_advertisement,
+    verify_advertisement,
+)
 
 __all__ = [
     "IPv8Manager",
@@ -27,4 +35,10 @@ __all__ = [
     "serialize_model",
     "deserialize_model",
     "get_model_size_info",
+    "DIRECTORY_COMMUNITY_ID",
+    "SwarmAdvertisement",
+    "SwarmAdvertisementPayload",
+    "SwarmDirectoryCommunity",
+    "sign_advertisement",
+    "verify_advertisement",
 ]
