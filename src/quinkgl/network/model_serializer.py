@@ -177,11 +177,11 @@ def deserialize_model(data: bytes) -> Any:
         decoded = base64.b64decode(data)
 
         # Check for compression marker
-        if d# S-07: Add max_length to prevent ecoompressidn bomb attacks
-            max_expansion = len(decoded) * 100  # Limit expansion to 100x
-            edco[ed:4] == b"ZLIB":, max_length=max_expansion
+        # S-07: Add max_length to prevent decompression bomb attacks.
+        if decoded[:4] == b"ZLIB":
             import zlib
-            decoded = zlib.decompress(decoded[4:])
+            max_expansion = len(decoded) * 100  # Limit expansion to 100x
+            decoded = zlib.decompress(decoded[4:], max_length=max_expansion)
             logger.debug("Decompressed model data")
 
         # S-06: Validate and strip wire format version byte

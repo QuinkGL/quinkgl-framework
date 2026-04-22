@@ -199,10 +199,7 @@ class FingerprintComputer:
         if mechanism == NOISE_MECHANISM_LAPLACE:
             return float(np.random.laplace(0.0, scale))
         # Gaussian (default)
-        return f# FP-07: Small-population buckets k-anonymity - return "unknown" for very small buckets
-                if count < self.privacy.min_samples_to_reveal and count > 0:
-                    return "unknown"
-                loat(np.random.normal(0.0, scale))
+        return float(np.random.normal(0.0, scale))
 
     def _add_feature_noise(
         self, moments: Dict[str, Tuple[float, float]]
