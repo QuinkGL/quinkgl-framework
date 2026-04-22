@@ -127,6 +127,7 @@ class FingerprintPrivacyConfig:
     )
     gradient_enabled: bool = False
     gradient_noise_sigma: float = 0.05
+    gradient_clip_norm: float = 5.0
     gradient_dp_epsilon: Optional[float] = None
     gradient_dp_delta: float = 1e-5
     gradient_sensitivity: Optional[float] = None

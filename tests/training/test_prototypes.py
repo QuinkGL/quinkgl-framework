@@ -240,11 +240,15 @@ class TestFedPACCollaborator:
         assert disc["p1"] == pytest.approx(5.0)  # L2 norm of (3,4)
 
     def test_compute_discrepancy_no_shared_labels(self):
+        # Peers with zero label-overlap get ``inf`` so the combination-weight
+        # softmax filters them out (exp(-inf) == 0).  A shared-label-free
+        # peer would otherwise dominate the weighted average with a phantom
+        # zero-distance and corrupt the aggregate.
         collab = FedPACCollaborator()
         my = {"a": ClassPrototype("a", np.array([1.0]), 5)}
         peers = {"p1": {"b": ClassPrototype("b", np.array([1.0]), 10)}}
         disc = collab.compute_discrepancy(my, peers)
-        assert disc["p1"] == pytest.approx(0.0)
+        assert disc["p1"] == float("inf")
 
     def test_compute_discrepancy_multiple_peers(self):
         collab = FedPACCollaborator()

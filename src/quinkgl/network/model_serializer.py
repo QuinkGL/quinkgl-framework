@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # Maximum size for serialized models (100 MB) to prevent DoS
 MAX_MODEL_SIZE_BYTES = 100 * 1024 * 1024
 
+# S-06: wire-format version byte prepended to every serialized model payload
+# before base64-encoding.  Bumping this value is a breaking on-wire change
+# and MUST coincide with a ``MANIFEST_SCHEMA_VERSION`` bump so peers refuse
+# to interoperate across incompatible model-frame encodings.
+WIRE_FORMAT_VERSION = 1
+
 
 def _serialize_numpy_array(arr: np.ndarray) -> bytes:
     """
