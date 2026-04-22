@@ -7,7 +7,7 @@ shift to exploitation as they learn the network.
 """
 
 import asyncio
-import random
+import random as _random
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -48,7 +48,7 @@ class CollaborationEdge:
 
     def decay(self, decay_factor: float = 0.95):
         self.rounds_since_update += 1
-        self.weight *= decay_factor ** self.rounds_since_update
+        self.weight *= decay_factor
 
     def record_collaboration(self, success: bool):
         self.total_rounds += 1
@@ -170,6 +170,8 @@ class AffinityTopology(TopologyStrategy):
         Governs cold-start phase transitions (from manifest policy).
     affinity_weights : AffinityWeights or None
         Weights for multi-signal affinity computation.
+    seed : int or None
+        Random seed for reproducible exploration sampling.
     """
 
     def __init__(
@@ -183,6 +185,7 @@ class AffinityTopology(TopologyStrategy):
         eviction_min_weight: float = 0.05,
         cold_start_rounds: int = 3,
         affinity_weights: Optional[AffinityWeights] = None,
+        seed: Optional[int] = None,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -198,6 +201,7 @@ class AffinityTopology(TopologyStrategy):
         self.affinity_weights = affinity_weights or AffinityWeights()
         self.history = CollaborationHistory()
         self._round_count = 0
+        self._rng = _random.Random(seed)
         # TOP-12: Add lock for history mutations
         self._lock = asyncio.Lock()
 
@@ -233,7 +237,7 @@ class AffinityTopology(TopologyStrategy):
 
         my_fp = context.my_fingerprint
         if my_fp is None:
-            selected = random.sample(compatible, min(count, len(compatible)))
+            selected = self._rng.sample(compatible, min(count, len(compatible)))
             return [p.peer_id for p in selected]
 
         scored: List[Tuple[str, float]] = []
@@ -273,7 +277,7 @@ class AffinityTopology(TopologyStrategy):
 
         if explore_pool_ids and n_explore > 0:
             targets.extend(
-                random.sample(explore_pool_ids, min(n_explore, len(explore_pool_ids)))
+                self._rng.sample(explore_pool_ids, min(n_explore, len(explore_pool_ids)))
             )
 
         self._round_count += 1

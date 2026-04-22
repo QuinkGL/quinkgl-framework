@@ -75,6 +75,8 @@ class Scaffold(AggregationStrategy):
         control_momentum: float = 0.0,
         **kwargs: Any,
     ) -> None:
+        if learning_rate <= 0:
+            raise ValueError(f"learning_rate must be > 0 — got {learning_rate}")
         super().__init__(**kwargs)
         self.learning_rate = learning_rate
         self.global_learning_rate = global_learning_rate

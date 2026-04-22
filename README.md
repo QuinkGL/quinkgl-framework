@@ -31,7 +31,7 @@ QuinkGL draws from the gossip learning paradigm [[Ormándi et al., 2013]](#refer
 | **Byzantine Fault Tolerance** | Krum, MultiKrum, TrimmedMean aggregation strategies |
 | **NAT Traversal** | IPv8 with UDP hole punching + automatic tunnel fallback |
 | **Framework Agnostic** | PyTorch, TensorFlow, or custom model wrappers |
-| **Swarm Manifest (planned)** | Manifest and protocol-identity work is under active development |
+| **Swarm Manifest** | Canonical SHA-256 commitment to training protocol and privacy policy |
 | **Personalized FL** | APFL adaptive mixing, FedRep-style backbone/head split |
 | **Staleness-Aware** | StalenessWeightedFedAvg for asynchronous environments |
 | **Variance Reduction** | SCAFFOLD with gossip-adapted control variates (Karimireddy et al., 2020) |
@@ -299,6 +299,8 @@ Fingerprint payloads are schema-versioned, strictly validated on parse, and can 
 The **Swarm Manifest** is a planned protocol-identity layer for binding swarm compatibility to a canonical description of the training protocol. The current repository snapshot exposes policy dataclasses under `quinkgl.manifest`, but it does not yet ship the full canonical manifest hash and community-ID isolation model described in the long-term design.
 
 Until that implementation lands, manifest-related material should be read as design direction rather than as a guaranteed runtime property of the current package build.
+
+Manifest serialization is canonicalized before hashing, and manifest payloads are schema-versioned and strictly validated to avoid silent field drops or incompatible policy mixes.
 
 ---
 

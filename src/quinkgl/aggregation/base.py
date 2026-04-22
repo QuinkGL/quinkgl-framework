@@ -178,6 +178,8 @@ class AggregationStrategy(ABC):
         if isinstance(weights, np.ndarray):
             return weights.shape
         elif isinstance(weights, dict):
+            # Include per-value shapes so that same-key but different-shaped
+            # tensors are caught before aggregation raises a broadcast error.
             items = []
             for key in sorted(weights.keys()):
                 items.append((key, self._get_shape(weights[key])))
