@@ -64,7 +64,7 @@ pip install -e ".[dev]"
 # Install
 pip install quinkgl
 
-# Create a swarm manifest
+# 1. Create a manifest (this is the swarm blueprint, not the swarm itself)
 quinkgl manifest create \
   --name my-swarm \
   --task-type class \
@@ -72,23 +72,27 @@ quinkgl manifest create \
   --output-shape 10 \
   --label-type integer \
   --model-framework pytorch \
-  --model-arch-hash sha256:abc... \
+  --model-arch-hash sha256:7f2c1a9b3e4d0123456789abcdef0123456789abcdef0123456789abcdef0123 \
   --aggregation FedAvg \
   --topology Random \
   --output swarm.qgl
 
-# Verify the manifest
+# 2. Verify the manifest
 quinkgl manifest verify swarm.qgl
 
-# Get a magnet URI
+# 3. Get a shareable magnet URI
 quinkgl manifest magnet swarm.qgl
 
-# Scaffold a custom peer project
+# 4. Scaffold a custom peer project
 quinkgl init --output-dir my-peer --template pytorch-vision --manifest swarm.qgl
 
-# Start a peer (dry-run first)
-quinkgl run --manifest swarm.qgl --data ./my_data --dry-run
+# 5. Start a peer — the swarm is born when the first peer runs
+quinkgl run --manifest swarm.qgl --script my-peer/peer_script.py --dry-run
 ```
+
+> **Note:** Creating the manifest does **not** start a swarm. The manifest is
+> only a static blueprint. A swarm comes into existence when the first peer
+> calls `quinkgl run` with that manifest.
 
 ### Python API
 
@@ -330,11 +334,26 @@ Fingerprint payloads are schema-versioned, strictly validated on parse, and can 
 
 ## Swarm Manifest
 
-The **Swarm Manifest** is a planned protocol-identity layer for binding swarm compatibility to a canonical description of the training protocol. The current repository snapshot exposes policy dataclasses under `quinkgl.manifest`, but it does not yet ship the full canonical manifest hash and community-ID isolation model described in the long-term design.
+The **Swarm Manifest** (`.qgl` file) is the canonical protocol-identity layer
+that binds swarm compatibility to a description of the training protocol,
+model architecture, aggregation strategy, topology, and trust boundary.
 
-Until that implementation lands, manifest-related material should be read as design direction rather than as a guaranteed runtime property of the current package build.
+A manifest is **not** a running swarm — it is only a static blueprint.  The
+swarm comes into existence when peers call `quinkgl run --manifest swarm.qgl`.
 
-Manifest serialization is canonicalized before hashing, and manifest payloads are schema-versioned and strictly validated to avoid silent field drops or incompatible policy mixes.
+Manifests are:
+
+- **Canonically hashed** (SHA-256 over deterministic JSON) so any change to
+  policy or architecture produces a new swarm identity.
+- **Schema-versioned** and strictly validated to avoid silent field drops or
+  incompatible policy mixes.
+- **Optionally signed** with Ed25519 so peers can verify creator identity
+  before joining.
+
+To create a manifest you need the architecture hash of your model, which is a
+fingerprint of layer names, shapes, and dtypes (not weights).  Compute it with
+`quinkgl.manifest.compute_arch_hash(model)` and pass it to
+`quinkgl manifest create --model-arch-hash <hash>`.
 
 ---
 

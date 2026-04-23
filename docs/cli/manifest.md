@@ -17,7 +17,7 @@ Build a new `.qgl` manifest file.
 | `--label-type` | yes | Label encoding name |
 | `--tags` | no | Comma-separated tags |
 | `--model-framework` | yes | `pytorch`, `tensorflow`, or `custom` |
-| `--model-arch-hash` | yes | Architecture digest (`sha256:...`) |
+| `--model-arch-hash` | yes | Architecture digest (`sha256:<64-hex>`) |
 | `--model-arch-file` | no | Optional architecture spec JSON |
 | `--aggregation` | yes | Aggregation strategy name |
 | `--aggregation-param` | no | `key=value` strategy params (repeatable) |
@@ -42,7 +42,7 @@ quinkgl manifest create \
   --output-shape 2 \
   --label-type integer \
   --model-framework pytorch \
-  --model-arch-hash sha256:abc... \
+  --model-arch-hash sha256:7f2c1a9b3e4d0123456789abcdef0123456789abcdef0123456789abcdef0123 \
   --aggregation FedAvg \
   --topology Random \
   --sign-with creator.key \
