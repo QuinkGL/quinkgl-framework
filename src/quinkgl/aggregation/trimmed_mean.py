@@ -2,7 +2,8 @@
 Trimmed Mean aggregation strategy.
 """
 
-from typing import List
+import logging
+from typing import List, Dict, Any
 
 import numpy as np
 
@@ -45,6 +46,7 @@ class TrimmedMean(AggregationStrategy):
         self._validate_updates(updates)
 
         if len(updates) < 3:
+            logging.error(f"TrimmedMean requires at least 3 updates, got {len(updates)}")
             raise ValueError("TrimmedMean requires at least 3 updates")
 
         self._get_trim_count(len(updates))
@@ -71,8 +73,8 @@ class TrimmedMean(AggregationStrategy):
     def _get_trim_count(self, n: int) -> int:
         k = int(n * self.trim_ratio)
         if self.trim_ratio > 0 and k == 0:
-            raise ValueError(
-                f"trim_ratio={self.trim_ratio} is too small for n={n}; no values would be trimmed"
+            logging.warning(
+                f"trim_ratio={self.trim_ratio} is too small for n={n}; no values will be trimmed, falling back to mean"
             )
         return k
 
@@ -119,6 +121,7 @@ class TrimmedMean(AggregationStrategy):
                 k = self._get_trim_count(n)
 
                 if k == 0:
+                    logging.warning("k=0 in TrimmedMean, falling back to simple mean")
                     trimmed = np.mean(weights_matrix, axis=0)
                 else:
                     trimmed_result = np.zeros_like(weights_matrix[0])
@@ -137,3 +140,12 @@ class TrimmedMean(AggregationStrategy):
                         break
 
         return result
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence (AGG-TASK-14)."""
+        return {"config": dict(self.config), "trim_ratio": self.trim_ratio}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot (AGG-TASK-14)."""
+        self.config = dict(state.get("config", {}))
+        self.trim_ratio = float(state.get("trim_ratio", self.trim_ratio))

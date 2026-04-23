@@ -7,6 +7,9 @@ recursive-include src/quinkgl *.py
 recursive-include src/quinkgl *.json
 recursive-include src/quinkgl *.txt
 
+# Protobuf files
+recursive-include protos *.proto
+
 # Documentation
 recursive-include docs *.md *.rst
 

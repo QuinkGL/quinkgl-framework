@@ -11,16 +11,23 @@ instead of pickle to prevent arbitrary code execution vulnerabilities.
 import base64
 import io
 import logging
-import struct
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
 import msgpack
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Maximum size for serialized models (100 MB) to prevent DoS
-MAX_MODEL_SIZE_BYTES = 100 * 1024 * 1024
+# S-06: Wire format version byte for forward compatibility
+WIRE_FORMAT_VERSION = 1
+
+# Maximum size for serialized models (unified with MAX_INCOMING_MESSAGE_SIZE)
+# Imported from gossip_community to avoid duplication
+try:
+    from quinkgl.network.gossip_community import MAX_INCOMING_MESSAGE_SIZE as MAX_MODEL_SIZE_BYTES
+except ImportError:
+    # Fallback if gossip_community not available
+    MAX_MODEL_SIZE_BYTES = 150 * 1024 * 1024
 
 
 def _serialize_numpy_array(arr: np.ndarray) -> bytes:
@@ -177,11 +184,34 @@ def deserialize_model(data: bytes) -> Any:
         decoded = base64.b64decode(data)
 
         # Check for compression marker
-        if d# S-07: Add max_length to prevent ecoompressidn bomb attacks
-            max_expansion = len(decoded) * 100  # Limit expansion to 100x
-            edco[ed:4] == b"ZLIB":, max_length=max_expansion
+        if decoded[:4] == b"ZLIB":
             import zlib
-            decoded = zlib.decompress(decoded[4:])
+            # NET-023/024: Streaming decompression with bytes-budget guard
+            compressed = decoded[4:]
+            max_expansion = len(compressed) * 100
+            decomp = zlib.decompressobj()
+            chunks: list[bytes] = []
+            total_bytes = 0
+            chunk_size = 64 * 1024
+            offset = 0
+            while offset < len(compressed):
+                end = min(offset + chunk_size, len(compressed))
+                out = decomp.decompress(compressed[offset:end], max_length=max_expansion - total_bytes)
+                total_bytes += len(out)
+                if total_bytes > max_expansion:
+                    raise ValueError(
+                        f"Decompressed data exceeds budget: {total_bytes} > {max_expansion} bytes"
+                    )
+                chunks.append(out)
+                offset = end
+            out = decomp.flush(max_length=max_expansion - total_bytes)
+            total_bytes += len(out)
+            if total_bytes > max_expansion:
+                raise ValueError(
+                    f"Decompressed data exceeds budget: {total_bytes} > {max_expansion} bytes"
+                )
+            chunks.append(out)
+            decoded = b"".join(chunks)
             logger.debug("Decompressed model data")
 
         # S-06: Validate and strip wire format version byte

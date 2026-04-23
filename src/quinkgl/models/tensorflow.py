@@ -35,21 +35,30 @@ class TensorFlowModel(ModelWrapper):
         """
         Get model weights as numpy arrays.
 
+        TASK-011: Supports multi-tensor layers (e.g. BatchNorm with
+        gamma, beta, moving_mean, moving_variance).  Each tensor is
+        stored with a numeric suffix:  ``{layer.name}/{i}``.
+
         Returns:
-            Dict mapping layer names to numpy arrays of weights
+            Dict mapping parameter names to numpy arrays of weights
         """
         weights = {}
         for layer in self.model.layers:
             layer_weights = layer.get_weights()
             if layer_weights:
                 for i, w in enumerate(layer_weights):
-                    key = f"{layer.name}_{'weight' if i == 0 else 'bias'}"
-                    weights[key] = w
+                    # TASK-011: Use numeric index instead of guessing weight/bias
+                    key = f"{layer.name}/{i}"
+                    weights[key] = np.array(w, copy=True)
         return weights
 
     def set_weights(self, weights: Dict[str, np.ndarray]) -> None:
         """
         Set model weights from numpy arrays.
+
+        TASK-011: Reconstructs per-layer weight lists from the flat dict,
+        supporting multi-tensor layers (e.g. BatchNorm).  Shape validation
+        is performed before assignment.
 
         Args:
             weights: Dict mapping parameter names to numpy arrays
@@ -58,45 +67,71 @@ class TensorFlowModel(ModelWrapper):
             ValueError: If weights are invalid (NaN, Inf, wrong types, etc.)
         """
         import logging
-        logger = logging.getLogger(__name__)
+        logging.getLogger(__name__)
 
-        # Reconstruct layer weights from dict
-        layer_weights = {}
+        # Validate all arrays first
         for key, array in weights.items():
-            # Ensure array is numpy type
             if not isinstance(array, np.ndarray):
                 try:
                     array = np.array(array)
+                    weights[key] = array
                 except Exception as e:
                     raise ValueError(f"Cannot convert weights[{key}] to numpy array: {e}")
-
-            # Check for NaN values
             if np.isnan(array).any():
                 raise ValueError(f"Weights[{key}] contains NaN values")
-
-            # Check for Inf values
             if np.isinf(array).any():
                 raise ValueError(f"Weights[{key}] contains Inf values")
 
-            # Parse key: "layer_name_weight" or "layer_name_bias"
-            parts = key.rsplit('_', 1)
-            if len(parts) == 2:
-                layer_name, weight_type = parts
-                if layer_name not in layer_weights:
-                    layer_weights[layer_name] = []
-                # Ensure correct order: weight then bias
-                if weight_type == 'weight':
-                    if len(layer_weights[layer_name]) == 1:
-                        layer_weights[layer_name].insert(0, array)
-                    else:
-                        layer_weights[layer_name].insert(0, array)
-                else:  # bias
-                    layer_weights[layer_name].append(array)
+        # TASK-011: Group weights by layer name, preserving index order
+        layer_groups: Dict[str, Dict[int, np.ndarray]] = {}
+        for key, array in weights.items():
+            parts = key.rsplit("/", 1)
+            if len(parts) != 2:
+                continue  # skip malformed keys
+            layer_name, idx_str = parts
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                continue
+            if layer_name not in layer_groups:
+                layer_groups[layer_name] = {}
+            layer_groups[layer_name][idx] = array
 
-        # Set weights for each layer
+        # Set weights for each layer with shape validation
         for layer in self.model.layers:
-            if layer.name in layer_weights:
-                layer.set_weights(layer_weights[layer.name])
+            if layer.name not in layer_groups:
+                continue
+            group = layer_groups[layer.name]
+            expected = layer.get_weights()
+            if len(expected) == 0:
+                continue
+
+            # Reconstruct ordered list of weight arrays
+            weight_arrays = []
+            for i in range(len(expected)):
+                if i not in group:
+                    raise ValueError(
+                        f"Missing weight index {i} for layer '{layer.name}'. "
+                        f"Expected {len(expected)} tensors, got keys: {sorted(group.keys())}"
+                    )
+                arr = group[i]
+                # TASK-011: Shape validation
+                if arr.shape != expected[i].shape:
+                    raise ValueError(
+                        f"Shape mismatch for '{layer.name}/{i}': "
+                        f"expected {expected[i].shape}, got {arr.shape}"
+                    )
+                # Validate dtype compatibility
+                if arr.dtype != expected[i].dtype:
+                    arr = arr.astype(expected[i].dtype)
+                weight_arrays.append(arr)
+
+            try:
+                layer.set_weights(weight_arrays)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to set weights for layer '{layer.name}': {e}"
+                )
 
     async def train(
         self,
@@ -187,14 +222,17 @@ class TensorFlowModel(ModelWrapper):
 
 
 class _EpochCallback:
-    """Keras callback for epoch end notifications."""
+    """TASK-012: Keras callback for epoch end notifications - subclasses keras.callbacks.Callback."""
     def __init__(self, callback_fn):
         # Defer keras import to avoid unnecessary dependency
         try:
             from tensorflow import keras
             self._keras = keras
+            # Subclass keras.callbacks.Callback if available
+            self._Callback = keras.callbacks.Callback
         except ImportError:
             self._keras = None
+            self._Callback = None
         self.callback_fn = callback_fn
 
     def on_epoch_end(self, epoch, logs=None):

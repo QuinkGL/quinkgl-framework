@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from quinkgl.telemetry.models import (
@@ -26,6 +26,7 @@ SUPPORTED_TELEMETRY_EVENT_TYPES = {
     "ipv8_payload_dropped",
     "model_received",
     "model_rejected_backpressure",
+    "model_rejected_duplicate",
     "model_rejected_stale",
     "model_send_failed",
     "model_send_started",
@@ -47,6 +48,23 @@ SUPPORTED_TELEMETRY_EVENT_TYPES = {
     "training_completed",
     "training_started",
     "tunnel_payload_dropped",
+}
+
+# T-OBS-14: Allowlist of payload keys per event type.
+# Events not listed here accept any payload keys (open schema).
+PAYLOAD_KEY_ALLOWLIST: Dict[str, set] = {
+    "training_completed": {"node_id", "round", "loss", "accuracy", "samples_trained", "domain"},
+    "model_sent": {"node_id", "round", "peer_ids", "weight_summary", "domain"},
+    "model_received": {"node_id", "round", "peer_id", "weight_summary", "domain"},
+    "aggregation_completed": {"node_id", "round", "peer_ids", "sample_count", "weight_summary", "domain"},
+    "peer_discovered": {"node_id", "round", "peer_id", "domain"},
+    "peer_disconnected": {"node_id", "peer_id", "domain"},
+    "targets_selected": {"node_id", "round", "selected_targets", "domain"},
+    "ipv8_payload_dropped": {"node_id", "peer_id", "transport", "reason", "security_event", "domain"},
+    "tunnel_payload_dropped": {"node_id", "peer_id", "reason", "security_event", "domain"},
+    "telemetry.events_dropped": {"base_url", "dropped_kind", "queue_size", "max_pending_items"},
+    "telemetry.delivery_failed": {"base_url", "kind", "error", "error_type", "consecutive_failures", "pending_queue_size"},
+    "telemetry.disconnected": {"base_url", "kind", "error", "error_type", "consecutive_failures", "pending_queue_size"},
 }
 
 
@@ -135,6 +153,12 @@ class TelemetryStore:
         timestamp = timestamp or datetime.now()
         if not self._is_supported_event_type(event_type):
             raise ValueError(f"Unknown telemetry event type: {event_type}")
+
+        # T-OBS-14: Filter payload keys against per-type allowlist
+        allowed_keys = PAYLOAD_KEY_ALLOWLIST.get(event_type)
+        if allowed_keys is not None:
+            payload = {k: v for k, v in payload.items() if k in allowed_keys}
+
         node_id = self._require_non_empty_node_id(payload.get("node_id"))
         node = self._get_or_create_node(node_id, payload.get("domain"), timestamp)
         event = NodeEvent(event_type=event_type, timestamp=timestamp, payload=dict(payload))

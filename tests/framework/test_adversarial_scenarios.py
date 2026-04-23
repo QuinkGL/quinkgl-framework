@@ -151,24 +151,36 @@ async def test_checkpoint_announce_from_unknown_senders_bounded():
 
 @pytest.mark.asyncio
 async def test_run_continuous_double_start_rejected():
-    """Call run_continuous twice concurrently → assert second returns or raises cleanly."""
+    """T8: Call run_continuous twice concurrently → second must return immediately.
+
+    Uses asyncio.Event for deterministic synchronization instead of
+    asyncio.sleep, so the test is stable regardless of event-loop timing.
+    """
     agg = _make_aggregator()
-    agg.data_provider = lambda: []  # No data, so training is a no-op
+
+    # Event that fires once the first run_continuous has entered its loop
+    started = asyncio.Event()
+
+    # Patch run_continuous to signal when it's running
+    _original_run = agg.run_continuous
+
+    async def _instrumented_run(**kwargs):
+        started.set()
+        return await _original_run(**kwargs)
+
+    agg.run_continuous = _instrumented_run
 
     # Start first run_continuous
     task1 = asyncio.create_task(agg.run_continuous())
 
-    # Give it a moment to start
-    await asyncio.sleep(0.01)
+    # Wait deterministically for the first call to start
+    await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    # Attempt to start second run_continuous
-    # Since there's no guard, this would actually run - but we can test
-    # that the state doesn't get corrupted by having them both try to set running=True
-    # For now, we just verify that both can complete without hanging
+    # Attempt to start second run_continuous — should return immediately
+    # since running=True is already set
     task2 = asyncio.create_task(agg.run_continuous())
 
-    # Stop the aggregator after a short time
-    await asyncio.sleep(0.05)
+    # Stop the aggregator
     agg.running = False
 
     # Both should complete without hanging

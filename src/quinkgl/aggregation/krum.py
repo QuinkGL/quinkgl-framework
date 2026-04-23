@@ -3,7 +3,7 @@ Krum aggregation strategies.
 """
 
 from copy import deepcopy
-from typing import List
+from typing import List, Dict, Any
 
 import numpy as np
 
@@ -162,3 +162,12 @@ class MultiKrum(Krum):
         result.metadata["weight_by"] = "uniform"
 
         return result
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence (AGG-TASK-14)."""
+        return {"config": dict(self.config), "num_byzantines": self.num_byzantines}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot (AGG-TASK-14)."""
+        self.config = dict(state.get("config", {}))
+        self.num_byzantines = int(state.get("num_byzantines", self.num_byzantines))

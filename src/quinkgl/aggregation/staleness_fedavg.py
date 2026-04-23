@@ -12,7 +12,7 @@ Reference:
 from typing import List
 import numpy as np
 
-from quinkgl.aggregation.base import AggregationStrategy, ModelUpdate, AggregatedModel
+from quinkgl.aggregation.base import ModelUpdate, AggregatedModel
 from quinkgl.aggregation.fedavg import FedAvg
 
 
@@ -26,6 +26,16 @@ class StalenessWeightedFedAvg(FedAvg):
 
     Staleness weight: 1 / (1 + staleness_coefficient * staleness)
     where staleness = current_round - update.round_number
+
+    AGG-TASK-10: Round-number synchronisation contract:
+        - All ModelUpdate instances must have a valid round_number attribute
+        - The caller should provide current_round parameter that represents
+          the current training round at the time of aggregation
+        - If current_round is 0, it will be inferred from the maximum
+          round_number in the updates (useful for first round)
+        - Staleness is computed as: max(0, current_round - update.round_number)
+        - Updates from future rounds (round_number > current_round) are
+          treated as current (staleness = 0) to avoid negative staleness
 
     Attributes:
         staleness_coefficient: Controls how aggressively stale updates
@@ -69,10 +79,15 @@ class StalenessWeightedFedAvg(FedAvg):
     async def aggregate(
         self,
         updates: List[ModelUpdate],
-        current_round: int = 0,
+        current_round: int = 0
     ) -> AggregatedModel:
         """
-        Aggregate with staleness-weighted averaging.
+        Aggregate with staleness weighting.
+
+        AGG-TASK-10: Round-number synchronisation contract:
+            - If current_round is 0, it is inferred from updates (max round_number)
+            - Staleness is computed as max(0, current_round - update.round_number)
+            - Future updates (round_number > current_round) treated as current.
 
         If current_round is not provided, uses the maximum round_number
         from the updates as the reference round.
@@ -93,19 +108,23 @@ class StalenessWeightedFedAvg(FedAvg):
             self.compute_staleness_weight(u, current_round)
             for u in updates
         ]
-        total_weight = sum(weights_list)
+        total_staleness_weight = sum(weights_list)
 
-        if total_weight == 0:
-            raise ValueError("Total staleness-weight is zero, cannot aggregate")
+        # AGG-TASK-13: Unified total weight zero behaviour - use uniform weight fallback
+        if total_staleness_weight == 0:
+            total_staleness_weight = len(updates)
+        if total_staleness_weight == 0:
+            # Fallback to 1 to avoid division by zero (shouldn't happen with valid updates)
+            total_staleness_weight = 1
 
         first_weights = updates[0].weights
 
         if isinstance(first_weights, np.ndarray):
-            aggregated = self._aggregate_numpy(updates, weights_list, total_weight)
+            aggregated = self._aggregate_numpy(updates, weights_list, total_staleness_weight)
         elif isinstance(first_weights, dict):
-            aggregated = self._aggregate_dict(updates, weights_list, total_weight)
+            aggregated = self._aggregate_dict(updates, weights_list, total_staleness_weight)
         else:
-            aggregated = self._aggregate_generic(updates, weights_list, total_weight)
+            aggregated = self._aggregate_generic(updates, weights_list, total_staleness_weight)
 
         staleness_info = [
             {

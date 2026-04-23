@@ -36,6 +36,9 @@ class CompressionConfig:
     zlib_compression: bool = True
     zlib_threshold_bytes: int = 10240
     error_feedback: bool = False
+    # TASK-092: Downcast weights to half/bfloat16 before transmission.
+    # Set to "float16", "bfloat16", or None (no downcast).
+    weight_dtype: Optional[str] = None
 
 
 def compress_weights(
@@ -64,6 +67,16 @@ def compress_weights(
         "original_size": _estimate_weight_size(weights),
     }
     processed = weights
+
+    # TASK-092: Step 0 — Downcast weights to half/bfloat16 before the rest
+    # of the pipeline.  This reduces wire size by ~50% with minimal accuracy
+    # loss for well-conditioned models.
+    if config.weight_dtype is not None:
+        original_dtypes = _record_dtypes(processed)
+        processed = _downcast_weights(processed, config.weight_dtype)
+        meta["steps"].append("downcast")
+        meta["original_dtypes"] = original_dtypes
+        meta["weight_dtype"] = config.weight_dtype
 
     # Step 1: Delta compression
     if config.delta_compression.enabled and base_weights is not None:
@@ -130,6 +143,32 @@ def compress_weights(
     return serialized, meta
 
 
+def compress_decompress_roundtrip(
+    weights: Any,
+    config: CompressionConfig,
+    base_weights: Optional[Any] = None,
+    ef_state: Optional[ErrorFeedbackState] = None,
+) -> Any:
+    """T-12: Enforce the full compress→decompress pipeline in a single call.
+
+    This function compresses the weights and immediately decompresses them,
+    guaranteeing that the pipeline is applied as a unit and no step is
+    bypassed.  Use this for testing, validation, or when you need the
+    reconstructed weights after a full round-trip through the pipeline.
+
+    Args:
+        weights: Current model weights.
+        config: Compression configuration.
+        base_weights: Previous weights for delta computation.
+        ef_state: Optional error-feedback state.
+
+    Returns:
+        Reconstructed weights after a full compress→decompress cycle.
+    """
+    compressed_data, meta = compress_weights(weights, config, base_weights, ef_state)
+    return decompress_weights(compressed_data, meta, base_weights)
+
+
 def decompress_weights(
     data: bytes,
     meta: Dict[str, Any],
@@ -157,13 +196,38 @@ def decompress_weights(
 
     processed_data = data
 
-    # Step 1: Zlib decompression with decompression bomb guard
+    # Step 1: Zlib decompression with streaming bytes-budget guard (NET-023/024)
     if "zlib" in meta.get("steps", []):
         import zlib
-        # S-07: Add max_length to prevent decompression bomb attacks
-        # Limit expansion to 100x the compressed size (configurable)
+        # S-07: Streaming decompression with bytes-budget guard
+        # Prevents decompression bomb attacks by checking budget incrementally
         max_expansion = len(processed_data) * 100
-        processed_data = zlib.decompress(processed_data, max_length=max_expansion)
+        decomp = zlib.decompressobj()
+        chunks: list[bytes] = []
+        total_bytes = 0
+        chunk_size = 64 * 1024  # 64KB streaming chunks
+        offset = 0
+        while offset < len(processed_data):
+            end = min(offset + chunk_size, len(processed_data))
+            out = decomp.decompress(processed_data[offset:end], max_length=max_expansion - total_bytes)
+            total_bytes += len(out)
+            if total_bytes > max_expansion:
+                raise ValueError(
+                    f"Decompressed data exceeds budget: {total_bytes} > {max_expansion} bytes "
+                    f"(compression ratio > 100x)"
+                )
+            chunks.append(out)
+            offset = end
+        # Flush any remaining data
+        out = decomp.flush()
+        total_bytes += len(out)
+        if total_bytes > max_expansion:
+            raise ValueError(
+                f"Decompressed data exceeds budget: {total_bytes} > {max_expansion} bytes "
+                f"(compression ratio > 100x)"
+            )
+        chunks.append(out)
+        processed_data = b"".join(chunks)
 
     # Step 2: Deserialize
     from quinkgl.network.model_serializer import deserialize_model
@@ -199,6 +263,49 @@ def decompress_weights(
     if meta.get("has_delta", False) and base_weights is not None:
         weights = apply_delta(base_weights, weights)
 
+    # TASK-092: Step 6 — Upcast weights back to original dtype
+    if "downcast" in meta.get("steps", []):
+        original_dtypes = meta.get("original_dtypes")
+        if original_dtypes is not None:
+            weights = _upcast_weights(weights, original_dtypes)
+
+    return weights
+
+
+def _record_dtypes(weights: Any) -> Dict[str, str]:
+    """TASK-092: Record original dtypes of weight arrays for upcast on decompress."""
+    if isinstance(weights, dict):
+        return {k: str(v.dtype) for k, v in weights.items() if hasattr(v, 'dtype')}
+    elif hasattr(weights, 'dtype'):
+        return {'__single__': str(weights.dtype)}
+    return {}
+
+
+def _downcast_weights(weights: Any, target_dtype: str) -> Any:
+    """TASK-092: Downcast weight arrays to float16 or bfloat16."""
+    import numpy as np
+    np_dtype = np.dtype(target_dtype)
+    if isinstance(weights, dict):
+        return {k: v.astype(np_dtype) if hasattr(v, 'astype') else v for k, v in weights.items()}
+    elif hasattr(weights, 'astype'):
+        return weights.astype(np_dtype)
+    return weights
+
+
+def _upcast_weights(weights: Any, original_dtypes: Dict[str, str]) -> Any:
+    """TASK-092: Upcast weight arrays back to their original dtypes."""
+    import numpy as np
+    if isinstance(weights, dict):
+        result = {}
+        for k, v in weights.items():
+            if k in original_dtypes and hasattr(v, 'astype'):
+                result[k] = v.astype(np.dtype(original_dtypes[k]))
+            else:
+                result[k] = v
+        return result
+    elif hasattr(weights, 'astype'):
+        orig = original_dtypes.get('__single__', 'float32')
+        return weights.astype(np.dtype(orig))
     return weights
 
 

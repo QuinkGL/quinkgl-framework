@@ -4,7 +4,7 @@ FedAvg Aggregation Strategy
 Federated Averaging: Weighted average of model updates based on sample count.
 """
 
-from typing import List
+from typing import List, Dict, Any
 import numpy as np
 
 from quinkgl.aggregation.base import (
@@ -85,8 +85,12 @@ class FedAvg(AggregationStrategy):
         weights_list = [self.compute_weight(u) for u in updates]
         total_weight = sum(weights_list)
 
+        # AGG-TASK-13: Unified total weight zero behaviour - use uniform weight fallback
         if total_weight == 0:
-            raise ValueError("Total weight is zero, cannot aggregate")
+            total_weight = len(updates)
+        if total_weight == 0:
+            # Fallback to 1 to avoid division by zero (shouldn't happen with valid updates)
+            total_weight = 1
 
         # Aggregate based on weight type
         first_weights = updates[0].weights
@@ -142,11 +146,9 @@ class FedAvg(AggregationStrategy):
         for key in all_keys:
             # Find first update that has this key
             first_value = None
-            first_index = -1
             for i, update in enumerate(updates):
                 if isinstance(update.weights, dict) and key in update.weights:
                     first_value = update.weights[key]
-                    first_index = i
                     break
 
             if first_value is None:
@@ -207,7 +209,7 @@ class FedAvg(AggregationStrategy):
 
         # Try to convert to numpy array
         try:
-            as_array = np.array(first_weights)
+            np.array(first_weights)
             # Create new updates with numpy arrays
             from copy import deepcopy
             numpy_updates = []
@@ -217,7 +219,7 @@ class FedAvg(AggregationStrategy):
                 numpy_updates.append(new_update)
             return self._aggregate_numpy(numpy_updates, weights_list, total_weight)
         except (TypeError, ValueError):
-            # If conversion fails, use simple average (uniform weights)
+                # If conversion fails, use simple average (uniform weights)
             # This is a fallback - may not work for all types
             try:
                 # Assume it's a list or sequence we can average
@@ -239,3 +241,11 @@ class FedAvg(AggregationStrategy):
                     f"Cannot aggregate weights of type {type(first_weights)}. "
                     "Use numpy arrays or dicts with numpy values."
                 )
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence (AGG-TASK-14)."""
+        return {"config": dict(self.config)}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot (AGG-TASK-14)."""
+        self.config = dict(state.get("config", {}))

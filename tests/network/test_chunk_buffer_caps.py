@@ -63,7 +63,7 @@ class TestMaxChunksPerTransfer:
         peer = _make_peer("aa" * 20)
         p = _payload("t1", "p1", total_chunks=MAX_CHUNKS_PER_TRANSFER + 1)
 
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -75,7 +75,7 @@ class TestMaxChunksPerTransfer:
         peer = _make_peer("aa" * 20)
         p = _payload("t1", "p1", total_chunks=MAX_CHUNKS_PER_TRANSFER)
 
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -100,7 +100,7 @@ class TestPerPeerTransferLimit:
 
         # This one should be rejected
         p = _payload("transfer-overflow", "p1")
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -125,7 +125,7 @@ class TestGlobalTransferLimit:
 
         peer = _make_peer("cc" * 20)
         p = _payload("overflow", "new-node")
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -151,7 +151,7 @@ class TestPerPeerByteBudget:
 
         # New transfer should be rejected
         p = _payload("new-t", "p1")
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 

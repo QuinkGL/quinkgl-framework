@@ -9,12 +9,11 @@ import hashlib
 import hmac
 
 import numpy as np
-from typing import Dict, Tuple, List, Optional, Any
+from typing import Dict, Tuple, Optional, Any
 
 from quinkgl.fingerprint.fingerprint import (
     DataFingerprint,
     FingerprintPrivacyConfig,
-    NOISE_MECHANISM_GAUSSIAN,
     NOISE_MECHANISM_LAPLACE,
     NOISE_MECHANISM_NONE,
 )
@@ -182,27 +181,16 @@ class FingerprintComputer:
     def _sample_noise(self, mechanism: str, scale: float) -> float:
         """Sample a fresh noise value per call.
 
-        # FP-01: Consume privacy budget for gradient moments if DP epsilon is configured
-        if self.privacy.gradient_dp_epsilon is not None:
-            num_moments = len(moments)
-            epsilon_per_moment = self.privacy.gradient_dp_epsilon / max(1, num_moments)
-            if not self._budget_tracker.consume(epsilon_per_moment, self.privacy.gradient_dp_delta):
-                # Budget exhausted, skip noise addition
-                return {k: (float(np.clip(mean, -clip, clip)), max(0.0, float(np.clip(var, -clip, clip)))) for k, (mean, var) in moments.items()}
-
-
         Privacy invariant: noise MUST be sampled per-query, never cached,
-        to prevent averaging-attack de-noising across repeated fingerprints.
+        reused across fingerprint instances, or derived from a deterministic
+        seed that could be guessed by an adversary.
         """
         if scale <= 0.0 or mechanism == NOISE_MECHANISM_NONE:
             return 0.0
         if mechanism == NOISE_MECHANISM_LAPLACE:
             return float(np.random.laplace(0.0, scale))
         # Gaussian (default)
-        return f# FP-07: Small-population buckets k-anonymity - return "unknown" for very small buckets
-                if count < self.privacy.min_samples_to_reveal and count > 0:
-                    return "unknown"
-                loat(np.random.normal(0.0, scale))
+        return float(np.random.normal(0.0, scale))
 
     def _add_feature_noise(
         self, moments: Dict[str, Tuple[float, float]]
@@ -236,7 +224,9 @@ class FingerprintComputer:
         scale = self.privacy.effective_gradient_noise_scale()
         mech = self.privacy.gradient_noise_mechanism
         # FP-04: Add gradient clipping to prevent extreme values
-        clip = self.privacy.gradient_clip_norm
+        clip = getattr(self.privacy, 'gradient_clip_norm', None)
+        if clip is None:
+            clip = self.privacy.feature_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
         for key, (mean, var) in moments.items():
             m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
@@ -245,6 +235,11 @@ class FingerprintComputer:
         return noised
 
     def _bucket_sample_count(self, count: int) -> str:
+        """T-11: Enforce k-anonymity on sample buckets."""
+        # For k-anonymity, return "unknown" for very small sample counts
+        # to prevent distinguishing between different small datasets
+        if count < 10:  # k=10 threshold for sample count privacy
+            return "unknown"
         for bucket_name, low, high in self.privacy.sample_count_buckets:
             if low <= count < high:
                 return bucket_name
@@ -252,6 +247,28 @@ class FingerprintComputer:
 
     @staticmethod
     def extract_bn_moments(weights: Dict[str, Any]) -> Dict[str, Tuple[float, float]]:
+        """Extract batch normalization running moments from model weights.
+
+        T-19: Document extraction of batch normalization statistics for fingerprinting.
+        
+        This function extracts the running mean and running variance from batch
+        normalization layers in the model. These statistics are used as part of
+        the model fingerprint to capture the distributional characteristics of
+        the model's learned parameters.
+
+        Args:
+            weights: Dictionary mapping parameter names to their values (numpy arrays).
+
+        Returns:
+            Dictionary mapping layer names to tuples of (mean, variance) for each
+            batch normalization layer's running statistics.
+
+        Notes:
+            - Looks for keys containing "running_mean" and "running_var"
+            - Strips the "running_" prefix to create the base key
+            - Returns the mean of the running mean and running variance arrays
+              (not the per-channel values, but aggregated statistics)
+        """
         moments: Dict[str, Tuple[float, float]] = {}
         for key, val in weights.items():
             if "running_mean" in key and isinstance(val, np.ndarray):

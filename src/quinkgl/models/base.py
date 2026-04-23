@@ -76,6 +76,10 @@ class ModelSplit:
 
 @dataclass
 class TrainingConfig:
+    """Configuration for model training.
+
+    TASK-042: Default optimizer is Adam with the specified learning_rate.
+    """
     epochs: int = 1
     batch_size: int = 32
     learning_rate: float = 0.001
@@ -125,7 +129,15 @@ class ModelWrapper(ABC):
         pass
 
     def get_data_schema_hash(self) -> str:
+        """TASK-028: Default implementation is unsafe - subclasses should override."""
+        import warnings
         import hashlib
+        warnings.warn(
+            "Using default get_data_schema_hash() which only uses class names. "
+            "Subclasses should override this with actual schema information.",
+            UserWarning,
+            stacklevel=2
+        )
         model_info = f"{self.__class__.__name__}_{self.model.__class__.__name__}"
         return hashlib.sha256(model_info.encode()).hexdigest()[:16]
 

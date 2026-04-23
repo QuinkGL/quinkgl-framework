@@ -77,6 +77,64 @@ class TestStalenessWeightedFedAvg:
         assert w_high < w_low
 
 
+class TestStalenessRoundSyncContract:
+    """AGG-TASK-10: Round-number synchronisation contract tests."""
+
+    @pytest.mark.asyncio
+    async def test_current_round_zero_infers_from_updates(self):
+        """When current_round=0, it should be inferred as max round_number."""
+        sw = StalenessWeightedFedAvg(staleness_coefficient=0.5)
+        updates = [
+            ModelUpdate(peer_id="p1", weights=np.array([1.0]), sample_count=10, round_number=3),
+            ModelUpdate(peer_id="p2", weights=np.array([2.0]), sample_count=10, round_number=7),
+        ]
+        result = await sw.aggregate(updates, current_round=0)
+        # current_round should be inferred as 7
+        assert result.metadata["current_round"] == 7
+        # p2 is current → staleness=0, p1 staleness=4
+        info = result.metadata["staleness_info"]
+        p1_info = [i for i in info if i["peer_id"] == "p1"][0]
+        p2_info = [i for i in info if i["peer_id"] == "p2"][0]
+        assert p1_info["staleness"] == 4
+        assert p2_info["staleness"] == 0
+
+    @pytest.mark.asyncio
+    async def test_future_round_treated_as_current(self):
+        """Updates from future rounds (round_number > current_round) get staleness=0."""
+        sw = StalenessWeightedFedAvg(staleness_coefficient=0.5)
+        future = ModelUpdate(peer_id="p1", weights=np.array([1.0]), round_number=15, sample_count=10)
+        current = ModelUpdate(peer_id="p2", weights=np.array([1.0]), round_number=10, sample_count=10)
+        w_future = sw.compute_staleness_weight(future, current_round=10)
+        w_current = sw.compute_staleness_weight(current, current_round=10)
+        assert w_future == w_current  # both staleness=0
+
+    @pytest.mark.asyncio
+    async def test_staleness_never_negative(self):
+        """Staleness is always >= 0 even for future updates."""
+        sw = StalenessWeightedFedAvg(staleness_coefficient=0.5)
+        updates = [
+            ModelUpdate(peer_id="p1", weights=np.array([1.0]), sample_count=10, round_number=100),
+            ModelUpdate(peer_id="p2", weights=np.array([2.0]), sample_count=10, round_number=50),
+        ]
+        result = await sw.aggregate(updates, current_round=10)
+        for info in result.metadata["staleness_info"]:
+            assert info["staleness"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_explicit_current_round_overrides_inference(self):
+        """When current_round is explicitly provided, it should be used directly."""
+        sw = StalenessWeightedFedAvg(staleness_coefficient=0.5)
+        updates = [
+            ModelUpdate(peer_id="p1", weights=np.array([1.0]), sample_count=10, round_number=5),
+            ModelUpdate(peer_id="p2", weights=np.array([2.0]), sample_count=10, round_number=10),
+        ]
+        result = await sw.aggregate(updates, current_round=20)
+        assert result.metadata["current_round"] == 20
+        info = result.metadata["staleness_info"]
+        p1_info = [i for i in info if i["peer_id"] == "p1"][0]
+        assert p1_info["staleness"] == 15  # 20 - 5
+
+
 class TestFedProxModes:
     def test_training_time_mode_default(self):
         fp = FedProx(mu=0.01)

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import argparse
 import time
-from typing import Dict
+from typing import Dict, Optional
 from concurrent import futures
 from datetime import datetime, timedelta
 
@@ -198,8 +198,12 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
                         break
                     
                     if get_msg_task in done:
-                        msg = get_msg_task.result()
-                        yield msg
+                        try:
+                            msg = get_msg_task.result()
+                            yield msg
+                        except Exception:
+                            # Task failed, continue to next iteration
+                            continue
                     else:
                         # Timeout - send heartbeat
                         if node_id:
@@ -269,8 +273,25 @@ class TunnelServicer(tunnel_pb2_grpc.TunnelServiceServicer):
             if stale_sessions:
                 logger.info(f"Pruned {len(stale_sessions)} stale signaling sessions")
 
-async def serve(host: str, port: int):
-    """Start the tunnel server."""
+async def serve(
+    host: str,
+    port: int,
+    # NET-016/017: TLS/mTLS server configuration
+    root_certificates_path: Optional[str] = None,
+    private_key_path: Optional[str] = None,
+    certificate_chain_path: Optional[str] = None,
+    require_client_cert: bool = False,
+):
+    """Start the tunnel server.
+
+    Args:
+        host: Host to bind to.
+        port: Port to bind to.
+        root_certificates_path: Path to CA cert PEM (for TLS/mTLS).
+        private_key_path: Path to server key PEM (for TLS/mTLS).
+        certificate_chain_path: Path to server cert PEM (for TLS/mTLS).
+        require_client_cert: If True, require client certificates (mTLS).
+    """
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=10),
         options=[
@@ -285,7 +306,29 @@ async def serve(host: str, port: int):
     tunnel_pb2_grpc.add_TunnelServiceServicer_to_server(servicer, server)
     
     listen_addr = f'{host}:{port}'
-    server.add_insecure_port(listen_addr)
+
+    # NET-016/017: Use secure port when TLS credentials are configured
+    if private_key_path and certificate_chain_path:
+        with open(private_key_path, 'rb') as f:
+            server_key = f.read()
+        with open(certificate_chain_path, 'rb') as f:
+            server_cert = f.read()
+
+        root_certificates = None
+        if root_certificates_path:
+            with open(root_certificates_path, 'rb') as f:
+                root_certificates = f.read()
+
+        server_credentials = grpc.ssl_server_credentials(
+            private_key_certificate_chain_pairs=[(server_key, server_cert)],
+            root_certificates=root_certificates,
+            require_client_auth=require_client_cert,
+        )
+        server.add_secure_port(listen_addr, server_credentials)
+        logger.info(f"TLS/mTLS enabled (require_client_cert={require_client_cert})")
+    else:
+        server.add_insecure_port(listen_addr)
+        logger.info("Running in insecure mode (no TLS)")
     
     await server.start()
     logger.info(f"✓ Tunnel server started on {listen_addr}")
@@ -305,10 +348,22 @@ def main():
     parser = argparse.ArgumentParser(description="QuinkGL Tunnel Server for NAT Traversal")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=50051, help="Port to bind to")
+    # NET-016/017: TLS/mTLS CLI arguments
+    parser.add_argument("--root-cert", type=str, default=None, help="Path to CA cert PEM")
+    parser.add_argument("--server-key", type=str, default=None, help="Path to server key PEM")
+    parser.add_argument("--server-cert", type=str, default=None, help="Path to server cert PEM")
+    parser.add_argument("--require-client-cert", action="store_true", help="Require client certs (mTLS)")
     
     args = parser.parse_args()
     
-    asyncio.run(serve(args.host, args.port))
+    asyncio.run(serve(
+        args.host,
+        args.port,
+        root_certificates_path=args.root_cert,
+        private_key_path=args.server_key,
+        certificate_chain_path=args.server_cert,
+        require_client_cert=args.require_client_cert,
+    ))
 
 if __name__ == "__main__":
     main()

@@ -73,10 +73,10 @@ class TestChunkBufferIsolation:
         payload_b = _make_chunk_payload(tid, "victim", 0, 2, b"B-data-0")
 
         # Invoke the real handler logic
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer_a, payload_a
         )
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer_b, payload_b
         )
 
@@ -103,10 +103,10 @@ class TestChunkBufferIsolation:
         p0 = _make_chunk_payload(tid, "node-1", 0, 3, b"chunk-0")
         p1 = _make_chunk_payload(tid, "node-1", 1, 3, b"chunk-1")
 
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p0
         )
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p1
         )
 
@@ -133,7 +133,7 @@ class TestCleanupTupleKeys:
             loss=0.1,
             accuracy=0.9,
         )
-        buf.created_at = time.time() - CHUNK_TRANSFER_TIMEOUT - 10
+        buf.created_at = time.monotonic() - CHUNK_TRANSFER_TIMEOUT - 10
         community._chunk_buffers[("mid-a", "t1")] = buf
 
         # Add a fresh buffer

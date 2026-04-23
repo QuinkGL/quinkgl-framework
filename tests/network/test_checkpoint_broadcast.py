@@ -110,13 +110,14 @@ class TestOnCheckpointCallback:
         community = MagicMock()
         community.on_checkpoint_callback = cb
         community.known_peers = {}
+        community.require_signature = False
 
         from quinkgl.network.gossip_community import GossipLearningCommunity
         payload = CheckpointPayload("peer-a", 20, 0.3, 0.7, "1.0.0")
         peer = MagicMock()
 
         # Call the undecorated handler directly
-        await GossipLearningCommunity.on_checkpoint.__wrapped__(
+        await GossipLearningCommunity._dispatch_checkpoint(
             community, peer, payload
         )
 

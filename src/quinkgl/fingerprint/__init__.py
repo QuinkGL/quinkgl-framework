@@ -9,7 +9,7 @@ from quinkgl.fingerprint.fingerprint import (
     NOISE_MECHANISM_GAUSSIAN,
     NOISE_MECHANISM_LAPLACE,
     NOISE_MECHANISM_NONE,
-    _BUCKET_ORDER,
+    _BUCKET_RANGES,
     _adjacent_bucket,
 )
 from quinkgl.fingerprint.computer import FingerprintComputer
@@ -24,6 +24,6 @@ __all__ = [
     "NOISE_MECHANISM_GAUSSIAN",
     "NOISE_MECHANISM_LAPLACE",
     "NOISE_MECHANISM_NONE",
-    "_BUCKET_ORDER",
+    "_BUCKET_RANGES",
     "_adjacent_bucket",
 ]

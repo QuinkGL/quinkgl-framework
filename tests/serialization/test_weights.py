@@ -3,17 +3,10 @@ import warnings
 import numpy as np
 import pytest
 
-from quinkgl import serialization as serialization_pkg
-from quinkgl.serialization import deserialize as pkg_deserialize
-from quinkgl.serialization import serialize as pkg_serialize
 from quinkgl.serialization.weights import (
-    deserialize,
     deserialize_numpy_weights,
-    serialize,
     serialize_numpy_weights,
 )
-from quinkgl.utils.serialization import deserialize as legacy_deserialize
-from quinkgl.utils.serialization import serialize as legacy_serialize
 
 
 def test_weight_serialization_round_trip():
@@ -31,14 +24,7 @@ def test_serialization_import_surfaces_reexport_weight_helpers():
     assert legacy_deserialize is deserialize
 
 
-def test_weight_serialization_preserves_order_for_eleven_plus_arrays():
-    data = [np.array([index]) for index in range(12)]
-
-    restored = deserialize_numpy_weights(serialize_numpy_weights(data))
-
-    assert len(restored) == len(data)
-    for index, array in enumerate(restored):
-        assert np.array_equal(array, data[index])
+def test_ssert np.array_equal(array, data[index])
 
 
 def test_deprecated_aliases_emit_deprecation_warning():

@@ -13,6 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# T12: Constant for tunnel server address
+DEFAULT_TUNNEL_SERVER = "localhost:50051"
+
 
 # ---------------------------------------------------------------------------
 # B9-1: message_queue has maxsize
@@ -21,7 +24,7 @@ import pytest
 def test_message_queue_bounded():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
     assert client.message_queue.maxsize > 0, "message_queue must have a maxsize"
     assert client.message_queue.maxsize == 1024
 
@@ -33,7 +36,7 @@ def test_message_queue_bounded():
 def test_on_disconnected_attribute():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
     assert hasattr(client, "on_disconnected")
     assert client.on_disconnected is None  # default
 
@@ -46,7 +49,7 @@ def test_on_disconnected_attribute():
 async def test_on_disconnected_fires_on_stream_error():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
     # Disable reconnect so the test doesn't spawn background tasks
     client._reconnect_enabled = False
 

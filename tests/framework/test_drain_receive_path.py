@@ -107,11 +107,13 @@ async def test_pending_cleared_after_loop_exit():
     async def _quick_loop():
         agg.running = True
         # Stop immediately after one iteration
-        async def stop_soon():
-            await asyncio.sleep(0.05)
-            agg.stop()
-        asyncio.create_task(stop_soon())
-        await agg.run_continuous(data_provider=None)
+        stop_task = asyncio.create_task(stop_soon())
+        try:
+            await agg.run_continuous(data_provider=None)
+        finally:
+            # T14: Cancel stop task on teardown
+            if not stop_task.done():
+                stop_task.cancel()
 
     await _quick_loop()
     assert len(agg.pending_updates) == 0

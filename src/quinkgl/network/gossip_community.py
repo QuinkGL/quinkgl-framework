@@ -18,6 +18,11 @@ import struct
 import tempfile
 import uuid
 from typing import Optional, Callable, List, Any, Dict
+
+
+def _get_monotonic_time() -> float:
+    """NET-039: Monotonic clock for staleness calculations."""
+    return time.monotonic()
 from dataclasses import dataclass, field
 
 from ipv8.community import Community
@@ -26,6 +31,7 @@ from ipv8.messaging.payload import Payload
 from ipv8.peer import Peer
 
 from quinkgl.network.model_serializer import serialize_model, deserialize_model
+from quinkgl.serialization import compress_weights, decompress_weights, CompressionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +140,133 @@ def _chunk_sign(private_key, sender_id: str, round_number: int,
     return private_key.signature(msg)
 
 
+# ── NET-003/004: Lightweight signing helpers for non-chunk payloads ──────
+
+def _sign_discovery(private_key, node_id: str, domain: str,
+                    data_schema_hash: str, model_version: str,
+                    fingerprint_json: str) -> bytes:
+    """Sign a DiscoveryAnnouncePayload for authenticity."""
+    msg = (
+        node_id.encode("utf-8")
+        + domain.encode("utf-8")
+        + data_schema_hash.encode("utf-8")
+        + model_version.encode("utf-8")
+        + hashlib.sha256(fingerprint_json.encode("utf-8")).digest()
+    )
+    return private_key.signature(msg)
+
+
+def _verify_discovery(public_key, signature: bytes, node_id: str, domain: str,
+                      data_schema_hash: str, model_version: str,
+                      fingerprint_json: str) -> bool:
+    """Verify a DiscoveryAnnouncePayload signature."""
+    if not signature:
+        return False
+    msg = (
+        node_id.encode("utf-8")
+        + domain.encode("utf-8")
+        + data_schema_hash.encode("utf-8")
+        + model_version.encode("utf-8")
+        + hashlib.sha256(fingerprint_json.encode("utf-8")).digest()
+    )
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
+
+
+def _sign_heartbeat(private_key, node_id: str, sequence: int) -> bytes:
+    """Sign a HeartbeatPayload."""
+    msg = node_id.encode("utf-8") + struct.pack("!I", sequence)
+    return private_key.signature(msg)
+
+
+def _verify_heartbeat(public_key, signature: bytes, node_id: str,
+                      sequence: int) -> bool:
+    """Verify a HeartbeatPayload signature."""
+    if not signature:
+        return False
+    msg = node_id.encode("utf-8") + struct.pack("!I", sequence)
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
+
+
+def _sign_checkpoint(private_key, sender_id: str, round_number: int,
+                     loss: float, accuracy: float, model_version: str) -> bytes:
+    """Sign a CheckpointPayload."""
+    msg = (
+        sender_id.encode("utf-8")
+        + struct.pack("!I", round_number)
+        + struct.pack("!d", loss)
+        + struct.pack("!d", accuracy)
+        + model_version.encode("utf-8")
+    )
+    return private_key.signature(msg)
+
+
+def _verify_checkpoint(public_key, signature: bytes, sender_id: str,
+                       round_number: int, loss: float, accuracy: float,
+                       model_version: str) -> bool:
+    """Verify a CheckpointPayload signature."""
+    if not signature:
+        return False
+    msg = (
+        sender_id.encode("utf-8")
+        + struct.pack("!I", round_number)
+        + struct.pack("!d", loss)
+        + struct.pack("!d", accuracy)
+        + model_version.encode("utf-8")
+    )
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
+
+
+def _sign_shuffle(private_key, sender_id: str, peers_bytes: bytes) -> bytes:
+    """Sign a ShufflePayload or ShuffleResponsePayload."""
+    msg = sender_id.encode("utf-8") + hashlib.sha256(peers_bytes).digest()
+    return private_key.signature(msg)
+
+
+def _verify_shuffle(public_key, signature: bytes, sender_id: str,
+                    peers_bytes: bytes) -> bool:
+    """Verify a ShufflePayload or ShuffleResponsePayload signature."""
+    if not signature:
+        return False
+    msg = sender_id.encode("utf-8") + hashlib.sha256(peers_bytes).digest()
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
+
+
+def _sign_prototype(private_key, sender_id: str, prototypes_json: str) -> bytes:
+    """Sign a PrototypeExchangePayload."""
+    msg = (
+        sender_id.encode("utf-8")
+        + hashlib.sha256(prototypes_json.encode("utf-8")).digest()
+    )
+    return private_key.signature(msg)
+
+
+def _verify_prototype(public_key, signature: bytes, sender_id: str,
+                      prototypes_json: str) -> bool:
+    """Verify a PrototypeExchangePayload signature."""
+    if not signature:
+        return False
+    msg = (
+        sender_id.encode("utf-8")
+        + hashlib.sha256(prototypes_json.encode("utf-8")).digest()
+    )
+    try:
+        return public_key.verify(signature, msg)
+    except Exception:
+        return False
+
+
 def _chunk_verify(public_key, signature: bytes, sender_id: str,
                   round_number: int, data_schema_hash: str,
                   chunk_index: int, chunk_data: bytes, *, sample_count: int = 0,
@@ -152,6 +285,13 @@ def _chunk_verify(public_key, signature: bytes, sender_id: str,
         return False
 
 
+def _scrub_pii(value: str, max_len: int = 16) -> str:
+    """T-OBS-17: Truncate identifiers in emitted events to limit PII exposure."""
+    if len(value) <= max_len:
+        return value
+    return value[:max_len] + "..."
+
+
 def _emit_ipv8_payload_dropped(community, reason: str, *, sender_id: Optional[str] = None,
                                peer_mid: Optional[str] = None, security_event: Optional[str] = None,
                                transport: Optional[str] = None, **details) -> None:
@@ -159,13 +299,13 @@ def _emit_ipv8_payload_dropped(community, reason: str, *, sender_id: Optional[st
     if not emitter:
         return
     payload = {
-        "node_id": getattr(community, "node_id", "unknown"),
+        "node_id": _scrub_pii(getattr(community, "node_id", "unknown")),
         "reason": reason,
     }
     if sender_id is not None:
-        payload["sender_id"] = sender_id
+        payload["sender_id"] = _scrub_pii(sender_id)
     if peer_mid is not None:
-        payload["peer_mid"] = peer_mid
+        payload["peer_mid"] = _scrub_pii(peer_mid)
     if transport is not None:
         payload["transport"] = transport
     for key, value in details.items():
@@ -182,18 +322,21 @@ class DiscoveryAnnouncePayload(Payload):
 
     Peers announce their domain and schema to find compatible peers.
     Optionally includes a fingerprint JSON blob for affinity computation.
+    Includes a cryptographic signature (NET-003) for authenticity.
     """
     msg_id = 1
-    format_list = ['varlenH', 'varlenH', 'varlenH', 'varlenH', 'varlenH']
+    format_list = ['varlenH', 'varlenH', 'varlenH', 'varlenH', 'varlenH', 'varlenH']
 
     def __init__(self, node_id: str, domain: str, data_schema_hash: str,
-                 model_version: str = "1.0.0", fingerprint_json: str = ""):
+                 model_version: str = "1.0.0", fingerprint_json: str = "",
+                 signature: bytes = b""):
         super().__init__()
         self.node_id = node_id
         self.domain = domain
         self.data_schema_hash = data_schema_hash
         self.model_version = model_version
         self.fingerprint_json = fingerprint_json
+        self.signature = signature
 
     def to_pack_list(self):
         return [
@@ -202,19 +345,24 @@ class DiscoveryAnnouncePayload(Payload):
             ('varlenH', self.data_schema_hash.encode('utf-8')),
             ('varlenH', self.model_version.encode('utf-8')),
             ('varlenH', self.fingerprint_json.encode('utf-8')),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
         fp_json = ""
-        if len(args) > 4:
-            fp_json = args[4].decode('utf-8') if args[4] else ""
+        if len(args) > 4 and args[4]:
+            fp_json = args[4].decode('utf-8')
+        sig = b""
+        if len(args) > 5:
+            sig = args[5]
         return cls(
             args[0].decode('utf-8'),
             args[1].decode('utf-8'),
             args[2].decode('utf-8'),
             args[3].decode('utf-8'),
             fp_json,
+            sig,
         )
 
 
@@ -223,11 +371,12 @@ class ModelUpdatePayload(Payload):
     Payload for model weight updates.
 
     Contains serialized model weights and metadata.
+    Supports compression pipeline (NET-019/020/021) via compression_meta_json.
 
     NOTE: Uses 'varlenI' for weights_bytes (large model), 'varlenH' for others
     """
     msg_id = 2
-    format_list = ['varlenH', 'varlenI', 'I', 'I', 'varlenH', 'd', 'd', 'I', 'varlenH']
+    format_list = ['varlenH', 'varlenI', 'I', 'I', 'varlenH', 'd', 'd', 'I', 'varlenH', 'varlenH']
 
     def __init__(
         self,
@@ -239,7 +388,8 @@ class ModelUpdatePayload(Payload):
         loss: float = 0.0,
         accuracy: float = 0.0,
         timestamp: int = 0,
-        signature: bytes = b""
+        signature: bytes = b"",
+        compression_meta_json: str = ""
     ):
         super().__init__()
         self.sender_id = sender_id
@@ -251,6 +401,7 @@ class ModelUpdatePayload(Payload):
         self.accuracy = accuracy
         self.timestamp = timestamp or int(time.time())
         self.signature = signature
+        self.compression_meta_json = compression_meta_json
 
     def to_pack_list(self):
         return [
@@ -263,10 +414,14 @@ class ModelUpdatePayload(Payload):
             ('d', self.accuracy),
             ('I', self.timestamp),
             ('varlenH', self.signature),
+            ('varlenH', self.compression_meta_json.encode('utf-8')),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
+        meta_json = ""
+        if len(args) > 9 and args[9]:
+            meta_json = args[9].decode('utf-8')
         return cls(
             args[0].decode('utf-8'),
             args[1],
@@ -277,53 +432,64 @@ class ModelUpdatePayload(Payload):
             args[6],
             args[7],
             args[8] if len(args) > 8 else b"",  # signature
+            meta_json,
         )
 
 
 class HeartbeatPayload(Payload):
-    """Payload for heartbeat messages."""
+    """Payload for heartbeat messages. Includes signature (NET-004)."""
     msg_id = 3
-    format_list = ['varlenH', 'I']
+    format_list = ['varlenH', 'I', 'varlenH']
 
-    def __init__(self, node_id: str, sequence: int):
+    def __init__(self, node_id: str, sequence: int, signature: bytes = b""):
         super().__init__()
         self.node_id = node_id
         self.sequence = sequence
+        self.signature = signature
 
     def to_pack_list(self):
         return [
             ('varlenH', self.node_id.encode('utf-8')),
-            ('I', self.sequence)
+            ('I', self.sequence),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
-        return cls(args[0].decode('utf-8'), args[1])
+        sig = b""
+        if len(args) > 2:
+            sig = args[2]
+        return cls(args[0].decode('utf-8'), args[1], sig)
 
 
 class PrototypeExchangePayload(Payload):
     msg_id = 8
-    format_list = ['varlenH', 'varlenH']
+    format_list = ['varlenH', 'varlenH', 'varlenH']
 
-    def __init__(self, sender_id: str, prototypes_json: str):
+    def __init__(self, sender_id: str, prototypes_json: str, signature: bytes = b""):
         super().__init__()
         self.sender_id = sender_id
         self.prototypes_json = prototypes_json
+        self.signature = signature
 
     def to_pack_list(self):
         return [
             ('varlenH', self.sender_id.encode('utf-8')),
             ('varlenH', self.prototypes_json.encode('utf-8')),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
-        return cls(args[0].decode('utf-8'), args[1].decode('utf-8'))
+        sig = b""
+        if len(args) > 2:
+            sig = args[2]
+        return cls(args[0].decode('utf-8'), args[1].decode('utf-8'), sig)
 
 
 class CheckpointPayload(Payload):
     """
-    Payload for checkpoint announcements (B2).
+    Payload for checkpoint announcements (B2). Includes signature (NET-004).
 
     Mirrors ``CheckpointAnnounceMessage`` fields for wire transmission.
     Consensus is IPv8-only; tunnel fallback does not broadcast checkpoints
@@ -331,16 +497,18 @@ class CheckpointPayload(Payload):
     consensus assumes a fully-connected overlay which tunnel does not provide).
     """
     msg_id = 9
-    format_list = ['varlenH', 'I', 'd', 'd', 'varlenH']
+    format_list = ['varlenH', 'I', 'd', 'd', 'varlenH', 'varlenH']
 
     def __init__(self, sender_id: str, round_number: int, loss: float,
-                 accuracy: float, model_version: str = "1.0.0"):
+                 accuracy: float, model_version: str = "1.0.0",
+                 signature: bytes = b""):
         super().__init__()
         self.sender_id = sender_id
         self.round_number = round_number
         self.loss = loss
         self.accuracy = accuracy
         self.model_version = model_version
+        self.signature = signature
 
     def to_pack_list(self):
         return [
@@ -349,16 +517,21 @@ class CheckpointPayload(Payload):
             ('d', self.loss),
             ('d', self.accuracy),
             ('varlenH', self.model_version.encode('utf-8')),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
+        sig = b""
+        if len(args) > 5:
+            sig = args[5]
         return cls(
             args[0].decode('utf-8'),  # sender_id
             args[1],                   # round_number
             args[2],                   # loss
             args[3],                   # accuracy
             args[4].decode('utf-8'),  # model_version
+            sig,                       # signature
         )
 
 
@@ -482,58 +655,70 @@ class RequestChunksPayload(Payload):
 
 class ShufflePayload(Payload):
     """
-    Payload for Cyclon shuffle request.
+    Payload for Cyclon shuffle request. Includes signature (NET-004).
 
     Contains a list of peer descriptors serialized as msgpack bytes
     for efficient transmission.
     """
     msg_id = 6
-    format_list = ['varlenH', 'varlenI']
+    format_list = ['varlenH', 'varlenI', 'varlenH']
 
-    def __init__(self, sender_id: str, peers_bytes: bytes):
+    def __init__(self, sender_id: str, peers_bytes: bytes, signature: bytes = b""):
         super().__init__()
         self.sender_id = sender_id
         self.peers_bytes = peers_bytes
+        self.signature = signature
 
     def to_pack_list(self):
         return [
             ('varlenH', self.sender_id.encode('utf-8')),
-            ('varlenI', self.peers_bytes)
+            ('varlenI', self.peers_bytes),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
+        sig = b""
+        if len(args) > 2:
+            sig = args[2]
         return cls(
             args[0].decode('utf-8'),
-            args[1]
+            args[1],
+            sig,
         )
 
 
 class ShuffleResponsePayload(Payload):
     """
-    Payload for Cyclon shuffle response.
+    Payload for Cyclon shuffle response. Includes signature (NET-004).
 
     Contains the responding peer's subset of view as msgpack bytes.
     """
     msg_id = 7
-    format_list = ['varlenH', 'varlenI']
+    format_list = ['varlenH', 'varlenI', 'varlenH']
 
-    def __init__(self, sender_id: str, peers_bytes: bytes):
+    def __init__(self, sender_id: str, peers_bytes: bytes, signature: bytes = b""):
         super().__init__()
         self.sender_id = sender_id
         self.peers_bytes = peers_bytes
+        self.signature = signature
 
     def to_pack_list(self):
         return [
             ('varlenH', self.sender_id.encode('utf-8')),
-            ('varlenI', self.peers_bytes)
+            ('varlenI', self.peers_bytes),
+            ('varlenH', self.signature),
         ]
 
     @classmethod
     def from_unpack_list(cls, *args):
+        sig = b""
+        if len(args) > 2:
+            sig = args[2]
         return cls(
             args[0].decode('utf-8'),
-            args[1]
+            args[1],
+            sig,
         )
 
 
@@ -571,7 +756,7 @@ class ChunkBuffer:
     
     def is_expired(self) -> bool:
         """Check if this transfer has timed out."""
-        return time.time() - self.created_at > CHUNK_TRANSFER_TIMEOUT
+        return _get_monotonic_time() - self.created_at > CHUNK_TRANSFER_TIMEOUT
     
     def reassemble(self) -> bytes:
         """
@@ -603,7 +788,7 @@ class PeerInfo:
         self.domain = domain
         self.data_schema_hash = data_schema_hash
         self.model_version = model_version
-        self.last_seen = time.time()
+        self.last_seen = _get_monotonic_time()
 
     def is_compatible(self, domain: str, data_schema_hash: str) -> bool:
         """Check if peer is compatible (same domain and schema)."""
@@ -614,11 +799,11 @@ class PeerInfo:
 
     def age(self) -> float:
         """Get seconds since last seen."""
-        return time.time() - self.last_seen
+        return _get_monotonic_time() - self.last_seen
 
     def update_seen(self):
         """Update last seen time."""
-        self.last_seen = time.time()
+        self.last_seen = _get_monotonic_time()
 
 
 class GossipLearningCommunity(Community):
@@ -668,6 +853,7 @@ class GossipLearningCommunity(Community):
 
         # Peer tracking
         self.known_peers: dict[str, PeerInfo] = {}  # node_id -> PeerInfo
+        self._MAX_KNOWN_PEERS = 500  # NET-028: Cap known_peers dict size
         # §4.4: reverse lookup — peer.mid hex → node_id
         self._mid_to_node_id: dict[str, str] = {}
 
@@ -863,19 +1049,22 @@ class GossipLearningCommunity(Community):
         if self.local_fingerprint is not None:
             try:
                 import json
-                from quinkgl.fingerprint.fingerprint import DataFingerprint
                 fp_dict = self.local_fingerprint.to_dict()
                 fingerprint_json = json.dumps(fp_dict)
             except Exception:
                 logger.debug("Could not serialize local fingerprint for announce")
 
         for peer in self.get_peers():
+            sig = _sign_discovery(self.my_peer.key, self.node_id, self.domain,
+                                  self.data_schema_hash, self.model_version,
+                                  fingerprint_json or "")
             self.ez_send(peer, DiscoveryAnnouncePayload(
                 self.node_id,
                 self.domain,
                 self.data_schema_hash,
                 self.model_version,
                 fingerprint_json,
+                sig,
             ))
 
     async def _send_heartbeat(self):
@@ -884,7 +1073,9 @@ class GossipLearningCommunity(Community):
         for peer_info in self.known_peers.values():
             self.ez_send(peer_info.peer, HeartbeatPayload(
                 self.node_id,
-                self._heartbeat_sequence
+                self._heartbeat_sequence,
+                _sign_heartbeat(self.my_peer.key, self.node_id,
+                                self._heartbeat_sequence)
             ))
 
     async def _cleanup_stale_peers(self):
@@ -921,7 +1112,7 @@ class GossipLearningCommunity(Community):
 
     async def _cleanup_outgoing_cache(self):
         """Remove old outgoing transfers from cache."""
-        current_time = time.time()
+        current_time = _get_monotonic_time()
         timeout = 600
         expired = [
             tid for tid, data in self._outgoing_transfers.items()
@@ -934,7 +1125,7 @@ class GossipLearningCommunity(Community):
         """Proactively NACK incomplete buffers older than threshold."""
         import struct
 
-        now = time.time()
+        now = _get_monotonic_time()
         for (peer_mid, transfer_id), buffer in list(self._chunk_buffers.items()):
             age = now - buffer.created_at
             if age < EARLY_NACK_AGE_THRESHOLD:
@@ -978,6 +1169,31 @@ class GossipLearningCommunity(Community):
 
     @lazy_wrapper(DiscoveryAnnouncePayload)
     async def on_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
+        """T5: lazy_wrapper entry point — delegates to _dispatch_discovery_announce."""
+        await self._dispatch_discovery_announce(peer, payload)
+
+    async def _dispatch_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
+        """T5: Core discovery-announce dispatch logic, extracted for testability."""
+        # NET-003: Verify discovery signature when present
+        if payload.signature:
+            if not _verify_discovery(peer.public_key, payload.signature,
+                                     payload.node_id, payload.domain,
+                                     payload.data_schema_hash, payload.model_version,
+                                     payload.fingerprint_json):
+                _emit_ipv8_payload_dropped(
+                    self, peer, "discovery",
+                    f"invalid signature from {payload.node_id}",
+                    security_event="security.signature_rejected",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self, peer, "discovery",
+                f"unsigned discovery from {payload.node_id}",
+                security_event="security.signature_missing",
+            )
+            return
+
         if payload.domain != self.domain or payload.data_schema_hash != self.data_schema_hash:
             logger.debug(
                 f"Incompatible peer: {payload.node_id} "
@@ -1006,6 +1222,11 @@ class GossipLearningCommunity(Community):
             if fingerprint is not None:
                 self.known_peers[payload.node_id].data_fingerprint = fingerprint
         else:
+            # NET-028: Cap known_peers dict size
+            if len(self.known_peers) >= self._MAX_KNOWN_PEERS:
+                logger.warning(f"Known peers limit ({self._MAX_KNOWN_PEERS}) reached, ignoring discovery from {payload.node_id}")
+                return
+
             peer_info = PeerInfo(
                 peer=peer,
                 node_id=payload.node_id,
@@ -1026,9 +1247,19 @@ class GossipLearningCommunity(Community):
     @lazy_wrapper(ModelUpdatePayload)
     async def on_model_update(self, peer: Peer, payload: ModelUpdatePayload):
         """
-        Handle incoming model update.
+        Handle incoming model update (lazy_wrapper entry point).
 
-        Deserializes weights and passes to callback.
+        T5: Delegates to _dispatch_model_update so that tests can call
+        the dispatch method directly without relying on __wrapped__.
+        """
+        await self._dispatch_model_update(peer, payload)
+
+    async def _dispatch_model_update(self, peer: Peer, payload: ModelUpdatePayload):
+        """
+        T5: Core model-update dispatch logic, extracted from on_model_update.
+
+        This method can be called directly in tests without going through
+        the lazy_wrapper decorator, replacing the old __wrapped__ pattern.
         """
         logger.debug(f"on_model_update called: sender={payload.sender_id}, round={payload.round_number}")
 
@@ -1161,9 +1392,14 @@ class GossipLearningCommunity(Community):
         if payload.sender_id in self.known_peers:
             self.known_peers[payload.sender_id].update_seen()
 
-        # Deserialize weights
+        # NET-019/020/021: Try compression pipeline first, fallback to simple deserialization
         try:
-            weights = deserialize_model(payload.weights_bytes)
+            if payload.compression_meta_json:
+                import json as _json
+                comp_meta = _json.loads(payload.compression_meta_json)
+                weights = decompress_weights(payload.weights_bytes, comp_meta)
+            else:
+                weights = deserialize_model(payload.weights_bytes)
         except ValueError as e:
             # Deserialization validation error (likely from size check in model_serializer)
             logger.error(f"Model validation failed from {payload.sender_id}: {e}")
@@ -1219,15 +1455,51 @@ class GossipLearningCommunity(Community):
     @lazy_wrapper(HeartbeatPayload)
     async def on_heartbeat(self, peer: Peer, payload: HeartbeatPayload):
         """Handle heartbeat message."""
+        # NET-004: Verify heartbeat signature when present
+        if payload.signature:
+            if not _verify_heartbeat(peer.public_key, payload.signature,
+                                     payload.node_id, payload.sequence):
+                _emit_ipv8_payload_dropped(
+                    self, peer, "heartbeat",
+                    f"invalid signature from {payload.node_id}",
+                    security_event="security.signature_rejected",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self, peer, "heartbeat",
+                f"unsigned heartbeat from {payload.node_id}",
+                security_event="security.signature_missing",
+            )
+            return
+
         if payload.node_id in self.known_peers:
             self.known_peers[payload.node_id].update_seen()
 
     @lazy_wrapper(PrototypeExchangePayload)
     async def on_prototype_exchange(self, peer: Peer, payload: PrototypeExchangePayload):
+        # NET-004: Verify prototype exchange signature when present
+        if payload.signature:
+            if not _verify_prototype(peer.public_key, payload.signature,
+                                     payload.sender_id, payload.prototypes_json):
+                _emit_ipv8_payload_dropped(
+                    self, peer, "prototype",
+                    f"invalid signature from {payload.sender_id}",
+                    security_event="security.signature_rejected",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self, peer, "prototype",
+                f"unsigned prototype from {payload.sender_id}",
+                security_event="security.signature_missing",
+            )
+            return
+
         try:
             from quinkgl.training.prototypes import PrototypeStore
             peer_protos = PrototypeStore.parse_peer_prototypes(
-                payload.sender_id, payload.prototypes_json
+                payload.prototypes_json
             )
             if self.on_prototype_callback:
                 await self.on_prototype_callback(payload.sender_id, peer_protos)
@@ -1245,7 +1517,33 @@ class GossipLearningCommunity(Community):
 
     @lazy_wrapper(CheckpointPayload)
     async def on_checkpoint(self, peer: Peer, payload: CheckpointPayload):
-        """Handle incoming checkpoint announcement (B2)."""
+        """T5: lazy_wrapper entry point — delegates to _dispatch_checkpoint."""
+        await self._dispatch_checkpoint(peer, payload)
+
+    async def _dispatch_checkpoint(self, peer: Peer, payload: CheckpointPayload):
+        """T5: Core checkpoint dispatch logic, extracted for testability."""
+        # NET-004: Verify checkpoint signature when present
+        if payload.signature:
+            if not _verify_checkpoint(peer.public_key, payload.signature,
+                                     payload.sender_id, payload.round_number,
+                                     payload.loss, payload.accuracy,
+                                     payload.model_version):
+                _emit_ipv8_payload_dropped(
+                    self,
+                    f"invalid checkpoint signature from {payload.sender_id}",
+                    security_event="security.signature_rejected",
+                    transport="checkpoint",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self,
+                f"unsigned checkpoint from {payload.sender_id}",
+                security_event="security.signature_missing",
+                transport="checkpoint",
+            )
+            return
+
         logger.debug(
             f"Received checkpoint from {payload.sender_id} "
             f"(round={payload.round_number}, loss={payload.loss:.4f})"
@@ -1266,12 +1564,15 @@ class GossipLearningCommunity(Community):
                              loss: float, accuracy: float,
                              model_version: str = "1.0.0"):
         """Broadcast a checkpoint to all known compatible peers (B2)."""
+        sig = _sign_checkpoint(self.my_peer.key, sender_id, round_number,
+                              loss, accuracy, model_version)
         payload = CheckpointPayload(
             sender_id=sender_id,
             round_number=round_number,
             loss=loss,
             accuracy=accuracy,
             model_version=model_version,
+            signature=sig,
         )
         for peer_info in self.known_peers.values():
             try:
@@ -1290,7 +1591,7 @@ class GossipLearningCommunity(Community):
 
         Returns True if the request is allowed (a token was consumed).
         """
-        now = time.time()
+        now = _get_monotonic_time()
         bucket = self._nack_buckets.get(peer_mid)
         if bucket is None:
             bucket = {"tokens": NACK_BUCKET_MAX_TOKENS, "last_refill": now}
@@ -1312,8 +1613,13 @@ class GossipLearningCommunity(Community):
 
     @lazy_wrapper(RequestChunksPayload)
     async def on_request_chunks(self, peer: Peer, payload: RequestChunksPayload):
-        """
-        Handle request for missing chunks (NACK).
+        """T5: lazy_wrapper entry point — delegates to _dispatch_request_chunks."""
+        await self._dispatch_request_chunks(peer, payload)
+
+    async def _dispatch_request_chunks(self, peer: Peer, payload: RequestChunksPayload):
+        """T5: Core NACK dispatch logic, extracted for testability.
+
+        Handles request for missing chunks (NACK).
         Resends the requested chunks if available in cache.
         """
         import struct
@@ -1483,9 +1789,12 @@ class GossipLearningCommunity(Community):
 
     @lazy_wrapper(ModelChunkPayload)
     async def on_model_chunk(self, peer: Peer, payload: ModelChunkPayload):
-        """
-        Handle incoming model chunk.
-        
+        """T5: lazy_wrapper entry point — delegates to _dispatch_model_chunk."""
+        await self._dispatch_model_chunk(peer, payload)
+
+    async def _dispatch_model_chunk(self, peer: Peer, payload: ModelChunkPayload):
+        """T5: Core model-chunk dispatch logic, extracted for testability.
+
         Buffers chunks and triggers model processing when all chunks are received.
         """
         if payload.chunk_index % 50 == 0:
@@ -1736,7 +2045,9 @@ class GossipLearningCommunity(Community):
                 peer_info = self.known_peers[payload.sender_id]
                 self.ez_send(peer_info.peer, HeartbeatPayload(
                     self.node_id,
-                    self._heartbeat_sequence
+                    self._heartbeat_sequence,
+                    _sign_heartbeat(self.my_peer.key, self.node_id,
+                                    self._heartbeat_sequence)
                 ))
         
         # If all chunks received, reassemble and process
@@ -1770,9 +2081,14 @@ class GossipLearningCommunity(Community):
                     )
                     return
 
-                # Deserialize
+                # NET-019/020/021: Try compression pipeline, fallback to simple deserialization
                 try:
-                    weights = deserialize_model(weights_bytes)
+                    if payload.compression_meta_json:
+                        import json as _json
+                        comp_meta = _json.loads(payload.compression_meta_json)
+                        weights = decompress_weights(weights_bytes, comp_meta)
+                    else:
+                        weights = deserialize_model(weights_bytes)
                 except Exception as e:
                     logger.error(f"Failed to deserialize model from {payload.sender_id}: {e}")
                     _emit_ipv8_payload_dropped(
@@ -1901,7 +2217,7 @@ class GossipLearningCommunity(Community):
             accuracy: Training accuracy
 
         Returns:
-            True if sent successfully
+            True if sent successfully, False otherwise.
         """
         if target_node_id not in self.known_peers:
             logger.warning(f"Unknown target peer: {target_node_id}")
@@ -1910,8 +2226,23 @@ class GossipLearningCommunity(Community):
         peer_info = self.known_peers[target_node_id]
 
         try:
-            # Serialize weights
-            weights_bytes = serialize_model(weights)
+            # NET-019/020/021: Try compression pipeline first, fallback to simple serialization
+            import json as _json
+            compression_config = CompressionConfig(
+                zlib_compression=True,
+                zlib_threshold_bytes=10240,
+            )
+            comp_meta_json = ""
+            try:
+                weights_bytes, comp_meta = compress_weights(weights, compression_config)
+                comp_meta_json = _json.dumps(comp_meta)
+                logger.debug(
+                    f"Compressed model: {comp_meta.get('original_size', '?')} -> "
+                    f"{len(weights_bytes)} bytes (steps: {comp_meta.get('steps', [])})"
+                )
+            except Exception as e:
+                logger.debug(f"Compression failed, falling back to simple serialization: {e}")
+                weights_bytes = serialize_model(weights)
 
             # Convert None to 0.0 for payload packing
             loss_val = loss if loss is not None else 0.0
@@ -1942,6 +2273,7 @@ class GossipLearningCommunity(Community):
                     accuracy=acc_val,
                     timestamp=timestamp,
                     signature=sig,
+                    compression_meta_json=comp_meta_json,
                 )
                 self.ez_send(peer_info.peer, payload)
                 logger.debug(f"Sent model update to {target_node_id} ({len(weights_bytes)} bytes)")
@@ -2101,6 +2433,24 @@ class GossipLearningCommunity(Community):
     @lazy_wrapper(ShufflePayload)
     async def on_shuffle_request(self, peer: Peer, payload: ShufflePayload):
         """Handle incoming Cyclon shuffle request."""
+        # NET-004: Verify shuffle signature when present
+        if payload.signature:
+            if not _verify_shuffle(peer.public_key, payload.signature,
+                                   payload.sender_id, payload.peers_bytes):
+                _emit_ipv8_payload_dropped(
+                    self, peer, "shuffle",
+                    f"invalid signature from {payload.sender_id}",
+                    security_event="security.signature_rejected",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self, peer, "shuffle",
+                f"unsigned shuffle from {payload.sender_id}",
+                security_event="security.signature_missing",
+            )
+            return
+
         remote_peers = self._deserialize_peer_list(payload.peers_bytes)
         sender_id = payload.sender_id
 
@@ -2109,7 +2459,9 @@ class GossipLearningCommunity(Community):
             response_bytes = self._serialize_peer_list(response_peers)
             self.ez_send(peer, ShuffleResponsePayload(
                 sender_id=self.node_id,
-                peers_bytes=response_bytes
+                peers_bytes=response_bytes,
+                signature=_sign_shuffle(self.my_peer.key, self.node_id,
+                                        response_bytes)
             ))
         else:
             from quinkgl.topology.base import PeerInfo as FrameworkPeerInfo
@@ -2126,12 +2478,32 @@ class GossipLearningCommunity(Community):
             response_bytes = self._serialize_peer_list(view_peers)
             self.ez_send(peer, ShuffleResponsePayload(
                 sender_id=self.node_id,
-                peers_bytes=response_bytes
+                peers_bytes=response_bytes,
+                signature=_sign_shuffle(self.my_peer.key, self.node_id,
+                                        response_bytes)
             ))
 
     @lazy_wrapper(ShuffleResponsePayload)
     async def on_shuffle_response(self, peer: Peer, payload: ShuffleResponsePayload):
         """Handle Cyclon shuffle response."""
+        # NET-004: Verify shuffle response signature when present
+        if payload.signature:
+            if not _verify_shuffle(peer.public_key, payload.signature,
+                                   payload.sender_id, payload.peers_bytes):
+                _emit_ipv8_payload_dropped(
+                    self, peer, "shuffle_response",
+                    f"invalid signature from {payload.sender_id}",
+                    security_event="security.signature_rejected",
+                )
+                return
+        elif self.require_signature:
+            _emit_ipv8_payload_dropped(
+                self, peer, "shuffle_response",
+                f"unsigned shuffle response from {payload.sender_id}",
+                security_event="security.signature_missing",
+            )
+            return
+
         remote_peers = self._deserialize_peer_list(payload.peers_bytes)
 
         if self.on_shuffle_callback:
@@ -2168,6 +2540,7 @@ class GossipLearningCommunity(Community):
         peer_info = self.known_peers[target_node_id]
         self.ez_send(peer_info.peer, ShufflePayload(
             sender_id=self.node_id,
-            peers_bytes=peers_bytes
+            peers_bytes=peers_bytes,
+            signature=_sign_shuffle(self.my_peer.key, self.node_id,
+                                    peers_bytes),
         ))
-        return b''

@@ -76,7 +76,6 @@ class AggregationStrategy(ABC):
         Returns:
             AggregatedModel containing the combined weights
         """
-        pass
 
     def compute_weight(self, update: ModelUpdate) -> float:
         """

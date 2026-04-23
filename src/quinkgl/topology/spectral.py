@@ -22,9 +22,16 @@ Usage:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
+
+try:
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.linalg import eigsh as _eigsh
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +98,9 @@ class SpectralAnalyzer:
         Threshold below which eigenvalues are considered zero.
     """
 
-    def __init__(self, tolerance: float = 1e-8) -> None:
+    def __init__(self, tolerance: float = 1e-8, subsample_threshold: int = 200) -> None:
         self.tolerance = tolerance
+        self.subsample_threshold = subsample_threshold
 
     def analyze(self, adjacency: np.ndarray) -> SpectralReport:
         """Run full spectral analysis on an adjacency matrix.
@@ -113,6 +121,22 @@ class SpectralAnalyzer:
         if n == 0:
             return SpectralReport()
 
+        # Validate adjacency is binary (0/1 entries)
+        if not np.all(np.isin(A, [0.0, 1.0]) | (A < 1e-8)):
+            logger.warning(
+                f"Adjacency matrix contains non-binary values. "
+                f"Expected 0/1 entries, found range [{A.min():.3f}, {A.max():.3f}]. "
+                f"This may indicate incorrect graph construction."
+            )
+
+        # Validate symmetry
+        if not np.allclose(A, A.T, atol=1e-8):
+            logger.warning(
+                f"Adjacency matrix is not symmetric. "
+                f"Max asymmetry: {np.max(np.abs(A - A.T)):.6f}. "
+                f"Symmetrizing automatically."
+            )
+
         # Zero out diagonal (no self-loops)
         np.fill_diagonal(A, 0.0)
 
@@ -130,7 +154,9 @@ class SpectralAnalyzer:
 
         # ---- Laplacian ----
         L = np.diag(degrees) - A
-        lap_eigenvalues = np.sort(np.linalg.eigvalsh(L))
+
+        # TOP-08: Use sparse eigsh for large graphs
+        lap_eigenvalues = self._compute_laplacian_eigenvalues(L, n)
 
         # Algebraic connectivity = λ₂ (second smallest)
         if n < 2:
@@ -142,7 +168,7 @@ class SpectralAnalyzer:
 
         # ---- Metropolis–Hastings mixing matrix ----
         W = self._metropolis_hastings(A, degrees, n)
-        mix_eigenvalues = np.sort(np.linalg.eigvalsh(W))
+        mix_eigenvalues = self._compute_mixing_eigenvalues(W, n)
 
         # Spectral gap = 1 − |second largest eigenvalue of W|
         if n < 2:
@@ -227,6 +253,52 @@ class SpectralAnalyzer:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _compute_laplacian_eigenvalues(self, L: np.ndarray, n: int) -> np.ndarray:
+        """Compute sorted Laplacian eigenvalues.
+
+        For large graphs (n > subsample_threshold), use sparse eigsh
+        to compute only the smallest eigenvalues needed for algebraic
+        connectivity.  Falls back to dense eigvalsh when scipy is
+        unavailable or n is small.
+        """
+        if n <= self.subsample_threshold or not _HAS_SCIPY:
+            return np.sort(np.linalg.eigvalsh(L))
+
+        # TOP-08: sparse mode — only compute k smallest eigenvalues
+        k = min(6, n)  # enough for λ₂ and a few neighbours
+        try:
+            L_sparse = csr_matrix(L)
+            vals, _ = _eigsh(L_sparse, k=k, which="SM")
+            return np.sort(vals)
+        except Exception as exc:
+            logger.warning(
+                f"Sparse eigsh failed ({exc}); falling back to dense decomposition"
+            )
+            return np.sort(np.linalg.eigvalsh(L))
+
+    def _compute_mixing_eigenvalues(self, W: np.ndarray, n: int) -> np.ndarray:
+        """Compute sorted mixing-matrix eigenvalues.
+
+        For large graphs (n > subsample_threshold), use sparse eigsh
+        to compute the extreme eigenvalues needed for the spectral gap.
+        Falls back to dense eigvalsh when scipy is unavailable or n is small.
+        """
+        if n <= self.subsample_threshold or not _HAS_SCIPY:
+            return np.sort(np.linalg.eigvalsh(W))
+
+        # TOP-08: sparse mode — compute both ends of the spectrum
+        k = min(6, n)
+        try:
+            W_sparse = csr_matrix(W)
+            # Largest magnitude eigenvalues capture both ends
+            vals, _ = _eigsh(W_sparse, k=k, which="LM")
+            return np.sort(vals)
+        except Exception as exc:
+            logger.warning(
+                f"Sparse eigsh failed ({exc}); falling back to dense decomposition"
+            )
+            return np.sort(np.linalg.eigvalsh(W))
 
     @staticmethod
     def _metropolis_hastings(A: np.ndarray, degrees: np.ndarray, n: int) -> np.ndarray:

@@ -13,6 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# T12: Constant for tunnel server address
+DEFAULT_TUNNEL_SERVER = "localhost:50051"
+
 
 # ---------------------------------------------------------------------------
 # B10-1: Reconnect constants exist
@@ -39,7 +42,7 @@ def test_reconnect_constants():
 async def test_reconnect_gives_up_after_max_attempts():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
 
     attempt_count = 0
 
@@ -68,7 +71,7 @@ async def test_reconnect_gives_up_after_max_attempts():
 async def test_reconnect_stops_on_success():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
 
     attempt_count = 0
 
@@ -98,7 +101,7 @@ async def test_reconnect_stops_on_success():
 async def test_close_disables_reconnect():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
     client.channel = AsyncMock()
 
     # Simulate a pending reconnect task
@@ -125,7 +128,7 @@ async def test_close_disables_reconnect():
 async def test_reconnect_loop_exits_when_disabled():
     from quinkgl.network.fallback.tunnel_client import TunnelClient
 
-    client = TunnelClient(tunnel_server="localhost:50051", node_id="n1")
+    client = TunnelClient(tunnel_server=DEFAULT_TUNNEL_SERVER, node_id="n1")
     client._reconnect_enabled = False
 
     connect_called = False

@@ -11,8 +11,7 @@ Features:
 """
 import asyncio
 import logging
-from typing import List, Optional, Dict, Set, Any
-from datetime import datetime
+from typing import List, Optional, Dict
 from quinkgl.topology.base import PeerInfo
 
 logger = logging.getLogger(__name__)
@@ -116,9 +115,7 @@ class PeerSampler:
                 return []
                 
             sample_size = min(count, len(candidates))
-            import random
-            rng = random.Random(self._seed)
-            return rng.sample(candidates, sample_size)
+            return self._rng.sample(candidates, sample_size)
 
     def get_view(self) -> List[PeerInfo]:
         """

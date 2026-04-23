@@ -96,6 +96,9 @@ class Scaffold(AggregationStrategy):
           2. Compute the corrected weight for each peer.
           3. Average the corrected weights.
           4. Update the running estimate of the global control variate.
+
+        AGG-TASK-09: Correction uses snapshotted global CV to ensure
+        consistency across the aggregation round.
         """
         self._validate_updates(updates)
         self._round += 1
@@ -110,11 +113,14 @@ class Scaffold(AggregationStrategy):
         c_avg = self._average_control_variates(peer_controls, updates)
 
         # --- 3. Correct and aggregate model weights ---
+        # AGG-TASK-09: Snapshot the global CV before correction to ensure consistency
+        c_snapshot = deepcopy(self._c_global) if self._c_global is not None else None
+
         first_weights = updates[0].weights
         if isinstance(first_weights, dict):
-            aggregated = self._aggregate_dict(updates, peer_controls, c_avg)
+            aggregated = self._aggregate_dict(updates, peer_controls, c_snapshot)
         elif isinstance(first_weights, np.ndarray):
-            aggregated = self._aggregate_numpy(updates, peer_controls, c_avg)
+            aggregated = self._aggregate_numpy(updates, peer_controls, c_snapshot)
         else:
             # Fallback: plain FedAvg without correction
             aggregated = self._plain_average(updates)
@@ -157,6 +163,15 @@ class Scaffold(AggregationStrategy):
             c   = global control variate estimate
             K   = number of local steps
             η   = learning rate
+
+        Note on "__single__" magic key:
+            For numpy array weights (non-dict), control variates are stored
+            using the special key "__single__" in dict metadata. This allows
+            uniform handling of both dict and numpy weight formats. When
+            local_weights is a numpy array, the returned control variate
+            will also be a numpy array, but when stored in ModelUpdate.metadata
+            it should use the "__single__" key for consistency with the
+            aggregation logic.
 
         Parameters
         ----------
@@ -271,10 +286,13 @@ class Scaffold(AggregationStrategy):
         total_samples = sum(u.sample_count for _, u in valid)
         if total_samples == 0:
             total_samples = len(valid)
+        if total_samples == 0:
+            logger.warning("No samples and no valid peers for control variate averaging, using uniform weight")
+            total_samples = 1
 
         result: Dict[str, np.ndarray] = {}
         for cv, u in valid:
-            w = float(u.sample_count) / total_samples if total_samples > 0 else 1.0 / len(valid)
+            w = float(u.sample_count) / total_samples if total_samples > 0 else 1.0 / len(valid) if len(valid) > 0 else 1.0
             for key, val in cv.items():
                 if key not in result:
                     result[key] = np.zeros_like(val, dtype=np.float64)
@@ -306,6 +324,9 @@ class Scaffold(AggregationStrategy):
         total_samples = sum(u.sample_count for u in updates)
         if total_samples == 0:
             total_samples = len(updates)
+        if total_samples == 0:
+            logger.warning("No samples and no updates for dict aggregation, using uniform weight")
+            total_samples = 1
 
         all_keys: set = set()
         for u in updates:
@@ -353,6 +374,9 @@ class Scaffold(AggregationStrategy):
         total_samples = sum(u.sample_count for u in updates)
         if total_samples == 0:
             total_samples = len(updates)
+        if total_samples == 0:
+            logger.warning("No samples and no updates for numpy aggregation, using uniform weight")
+            total_samples = 1
 
         acc = np.zeros_like(updates[0].weights, dtype=np.float64)
         for u, cv in zip(updates, peer_controls):
@@ -378,6 +402,9 @@ class Scaffold(AggregationStrategy):
         total_samples = sum(u.sample_count for u in updates)
         if total_samples == 0:
             total_samples = len(updates)
+        if total_samples == 0:
+            logger.warning("No samples and no updates for plain average, using uniform weight")
+            total_samples = 1
 
         if isinstance(updates[0].weights, np.ndarray):
             acc = np.zeros_like(updates[0].weights, dtype=np.float64)

@@ -9,7 +9,7 @@ References:
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -43,6 +43,7 @@ class ConvergenceReport:
     rounds_without_improvement: int
     loss_trend: str
     accuracy_trend: str
+    reason_code: str = ""
 
 
 class ConvergenceMonitor:
@@ -99,6 +100,7 @@ class ConvergenceMonitor:
             self._rounds_without_improvement += 1
 
         status = self._determine_status(loss, accuracy)
+        reason_code = self._get_reason_code(status, loss, accuracy)
 
         return ConvergenceReport(
             status=status,
@@ -109,6 +111,7 @@ class ConvergenceMonitor:
             rounds_without_improvement=self._rounds_without_improvement,
             loss_trend=self._compute_trend(self._loss_history),
             accuracy_trend=self._compute_trend(self._accuracy_history),
+            reason_code=reason_code,
         )
 
     def should_stop(self, report: ConvergenceReport) -> bool:
@@ -130,7 +133,12 @@ class ConvergenceMonitor:
         return False
 
     def _determine_status(self, loss: float, accuracy: float) -> ConvergenceStatus:
-        """Determine convergence status from current metrics."""
+        """Determine convergence status from current metrics.
+
+        TASK-015: Uses a noise-robust Mann-Kendall trend test on the
+        recent loss window instead of a simple first-last difference,
+        making plateau detection resilient to stochastic training noise.
+        """
         if self.config.target_accuracy is not None and accuracy >= self.config.target_accuracy:
             return ConvergenceStatus.CONVERGED
 
@@ -144,8 +152,11 @@ class ConvergenceMonitor:
         if len(recent) < 2:
             return ConvergenceStatus.IMPROVING
 
-        loss_change = abs(recent[-1] - recent[0])
-        if loss_change < self.config.min_delta:
+        # TASK-015: Noise-robust plateau detection via Mann-Kendall S statistic.
+        # Counts concordant/discordant pairs; S ≈ 0 means no trend (plateau).
+        is_plateau = self._mann_kendall_plateau(recent, self.config.min_delta)
+
+        if is_plateau:
             if self._rounds_without_improvement >= self.config.patience:
                 return ConvergenceStatus.CONVERGED
             return ConvergenceStatus.PLATEAU
@@ -154,6 +165,55 @@ class ConvergenceMonitor:
             return ConvergenceStatus.DIVERGING
 
         return ConvergenceStatus.IMPROVING
+
+    @staticmethod
+    def _mann_kendall_plateau(values: List[float], min_delta: float) -> bool:
+        """TASK-015: Mann-Kendall trend test for noise-robust plateau detection.
+
+        Computes the S statistic: for each pair (i, j) with i < j,
+        sgn(x_j − x_i) is summed.  A small |S| relative to the
+        maximum possible indicates no monotonic trend — i.e., a
+        plateau — even when individual values are noisy.
+
+        Returns True if the series shows no statistically significant
+        monotonic trend (plateau), False otherwise.
+        """
+        n = len(values)
+        if n < 2:
+            return True
+
+        s = 0
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                diff = values[j] - values[i]
+                if diff > min_delta:
+                    s += 1
+                elif diff < -min_delta:
+                    s -= 1
+                # else: diff within noise floor, treat as tie (s += 0)
+
+        # Normalise S to [-1, 1] range.  Maximum |S| = n*(n-1)/2.
+        max_s = n * (n - 1) / 2
+        if max_s == 0:
+            return True
+
+        # If |S| / max_s < 0.3, there's no strong monotonic trend → plateau.
+        # The 0.3 threshold corresponds roughly to a p-value > 0.05 for n ≥ 10.
+        normalized = abs(s) / max_s
+        return normalized < 0.3
+
+    def _get_reason_code(self, status: ConvergenceStatus, loss: float, accuracy: float) -> str:
+        """TASK-025: Generate reason code for stopping decision."""
+        if status == ConvergenceStatus.CONVERGED:
+            if self.config.target_accuracy is not None and accuracy >= self.config.target_accuracy:
+                return "target_accuracy_reached"
+            if self.config.target_loss is not None and loss <= self.config.target_loss:
+                return "target_loss_reached"
+            if self._rounds_without_improvement >= self.config.patience:
+                return "plateau_patience_exceeded"
+        elif status == ConvergenceStatus.DIVERGING:
+            return "loss_diverging"
+        return "continue"
 
     @staticmethod
     def _compute_trend(history: List[float]) -> str:
@@ -184,3 +244,37 @@ class ConvergenceMonitor:
     @property
     def rounds_without_improvement(self) -> int:
         return self._rounds_without_improvement
+
+    def state_dict(self) -> Dict:
+        """Serialize state for persistence (TASK-015)."""
+        return {
+            "best_loss": self._best_loss,
+            "best_accuracy": self._best_accuracy,
+            "rounds_without_improvement": self._rounds_without_improvement,
+            "loss_history": self._loss_history,
+            "accuracy_history": self._accuracy_history,
+            "config": {
+                "window_size": self.config.window_size,
+                "patience": self.config.patience,
+                "min_delta": self.config.min_delta,
+                "target_accuracy": self.config.target_accuracy,
+                "target_loss": self.config.target_loss,
+                "diverging_threshold": self.config.diverging_threshold,
+            }
+        }
+
+    def load_state_dict(self, state_dict: Dict) -> None:
+        """Load state from dict for persistence (TASK-015)."""
+        self._best_loss = state_dict.get("best_loss", float('inf'))
+        self._best_accuracy = state_dict.get("best_accuracy", 0.0)
+        self._rounds_without_improvement = state_dict.get("rounds_without_improvement", 0)
+        self._loss_history = state_dict.get("loss_history", [])
+        self._accuracy_history = state_dict.get("accuracy_history", [])
+        
+        config_data = state_dict.get("config", {})
+        self.config.window_size = config_data.get("window_size", 10)
+        self.config.patience = config_data.get("patience", 20)
+        self.config.min_delta = config_data.get("min_delta", 1e-4)
+        self.config.target_accuracy = config_data.get("target_accuracy")
+        self.config.target_loss = config_data.get("target_loss")
+        self.config.diverging_threshold = config_data.get("diverging_threshold", 0.5)

@@ -20,9 +20,8 @@ Usage:
 """
 
 import logging
-from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -162,6 +161,28 @@ class ErrorFeedbackState:
             momentum=config_data.get("momentum", 0.0),
             max_residual_norm=config_data.get("max_residual_norm", None),
         )
+
+    def save(self, filepath: str) -> None:
+        """
+        Save state to a file for persistence.
+
+        Args:
+            filepath: Path to save the state.
+        """
+        import json
+        with open(filepath, 'w') as f:
+            json.dump(self.state_dict(), f)
+
+    def load(self, filepath: str) -> None:
+        """
+        Load state from a file.
+
+        Args:
+            filepath: Path to load the state from.
+        """
+        import json
+        with open(filepath, 'r') as f:
+            self.load_state_dict(json.load(f))
 
     @property
     def total_residual_norm(self) -> float:

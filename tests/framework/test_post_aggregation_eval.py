@@ -21,10 +21,14 @@ import os
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+
+# T2: Skip test if torchvision is not installed
+torchvision = pytest.importorskip("torchvision")
 from torchvision import datasets, transforms
+
+# T15: Defer torch imports inside fixtures/functions
+torch = pytest.importorskip("torch")
+from torch.utils.data import DataLoader, Subset
 
 from quinkgl.gossip.aggregator import ModelAggregator
 from quinkgl.models.base import TrainingConfig
@@ -39,18 +43,24 @@ CIFAR10_ROOT = "/tmp/cifar10_data"
 # ---------------------------------------------------------------------------
 # Tiny CNN  (~18 k params)
 # ---------------------------------------------------------------------------
-
-class TinyCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 8,  3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(2),
-        )
+def _get_tiny_nn_c():
+   """15: Defer torch.nn import until needed."""
+    mport torch.n as nn
+    
+    class Tin
+    class TinyCNN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.features = nn.Sequential(
+                nn.Conv2d(3, 8,  3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                nn.Conv2d(8, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(2),
+            )
         self.classifier = nn.Linear(16 * 2 * 2, 10)
-
-    def forward(self, x):
+    
+    def     forward(self, x):
+    
+    return TinyCNN
         return self.classifier(self.features(x).flatten(1))
 
 
@@ -113,6 +123,7 @@ async def _run_gossip(n_rounds: int, train_loader, val_loader):
     Returns lists of post_aggregation_eval event payloads for each node.
     """
     def make_node(peer_id, target_id):
+        TinyCNN = _get_tiny_cnn_class()
         model = PyTorchModel(TinyCNN())
         agg = ModelAggregator(
             peer_id=peer_id,

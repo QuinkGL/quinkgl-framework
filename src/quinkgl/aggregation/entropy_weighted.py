@@ -13,9 +13,8 @@ Reference:
     https://doi.org/10.3390/electronics13214193
 """
 
-from typing import List, Optional
+from typing import List, Dict, Any
 import logging
-import math
 import numpy as np
 
 from quinkgl.aggregation.base import (
@@ -213,3 +212,11 @@ class EntropyWeightedAvg(AggregationStrategy):
         for arr, w in zip(arrays, norm_weights):
             result += arr * w
         return result
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence (AGG-TASK-14)."""
+        return {"config": dict(self.config)}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot (AGG-TASK-14)."""
+        self.config = dict(state.get("config", {}))

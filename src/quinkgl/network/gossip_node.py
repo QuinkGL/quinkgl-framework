@@ -39,6 +39,7 @@ from quinkgl.network.ipv8_manager import IPv8Manager
 from quinkgl.network.gossip_community import generate_community_id
 from quinkgl.network.gossip_community import GossipLearningCommunity
 from quinkgl.network.gossip_community import MAX_ROUND_SKIP
+from quinkgl.network.gossip_community import _scrub_pii
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +313,7 @@ class GossipNode:
             emitter = self.gl_node.aggregator.event_emitter
             if emitter:
                 emitter.emit("security.tunnel_downgrade", {
-                    "node_id": self.node_id,
+                    "node_id": _scrub_pii(self.node_id),
                     "domain": self.domain,
                     "reason": "ipv8_failed_or_timed_out",
                 })
@@ -333,14 +334,14 @@ class GossipNode:
         mode_str = "IPv8 P2P" if self.connection_mode == ConnectionMode.IPV8_P2P else "Tunnel Relay"
         logger.debug(f"GossipNode '{self.node_id}' started in {mode_str} mode")
 
-        self._start_time = time.time()
+        self._start_time = time.monotonic()
 
         # Emit lifecycle events so observers render the startup banner
         emitter = self.gl_node.aggregator.event_emitter
         if emitter:
             from quinkgl import __version__ as _ver
             emitter.emit("node.config", {
-                "node_id": self.node_id,
+                "node_id": _scrub_pii(self.node_id),
                 "version": _ver,
                 "domain": self.domain,
                 "port": self.port,
@@ -360,7 +361,7 @@ class GossipNode:
                 } if self.fingerprint else None,
             })
             emitter.emit("node.started", {
-                "node_id": self.node_id,
+                "node_id": _scrub_pii(self.node_id),
                 "connection_mode": mode_str,
             })
 
@@ -373,7 +374,7 @@ class GossipNode:
         """
         try:
             # Step 1: Start IPv8 (with timeout)
-            start_time = time.time()
+            start_time = time.monotonic()
 
             try:
                 await asyncio.wait_for(
@@ -429,7 +430,7 @@ class GossipNode:
             # Guarantee at least MIN_PEER_DISCOVERY_WINDOW seconds for
             # discovery even if IPv8 start consumed most of the budget.
             MIN_PEER_DISCOVERY_WINDOW = 5.0
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
             remaining_timeout = max(
                 MIN_PEER_DISCOVERY_WINDOW,
                 self.fallback_timeout - elapsed,
@@ -440,6 +441,15 @@ class GossipNode:
                     f"user fallback_timeout={self.fallback_timeout}s, "
                     f"elapsed={elapsed:.2f}s, using {remaining_timeout}s"
                 )
+                # Emit event for observability
+                emitter = self.gl_node.aggregator.event_emitter
+                if emitter:
+                    emitter.emit("peer_discovery_timeout_overridden", {
+                        "node_id": _scrub_pii(self.node_id),
+                        "user_timeout": self.fallback_timeout,
+                        "elapsed": elapsed,
+                        "actual_timeout": remaining_timeout,
+                    })
 
             if remaining_timeout > 0:
                 try:
@@ -690,7 +700,14 @@ class GossipNode:
             if my_peer is not None and getattr(my_peer, "key", None) is not None:
                 return my_peer.key
 
-        key_file = os.path.join(tempfile.gettempdir(), f"ipv8_quinkgl_{self.node_id}.pem")
+        # Use XDG config directory for key persistence
+        try:
+            from xdg import BaseDirectory
+            config_dir = BaseDirectory.save_config_path("quinkgl")
+        except ImportError:
+            config_dir = os.path.expanduser("~/.config/quinkgl")
+        
+        key_file = os.path.join(config_dir, f"ipv8_quinkgl_{self.node_id}.pem")
         if not os.path.exists(key_file):
             return None
 
@@ -701,6 +718,51 @@ class GossipNode:
         except Exception as exc:
             logger.warning(f"Failed to load tunnel signing key for {self.node_id}: {exc}")
             return None
+
+    def rotate_identity(self) -> bool:
+        """Generate a new IPv8 key pair, backing up the old key.
+
+        Creates a fresh ECDSA "medium" key, writes it to the XDG config
+        directory, and renames the old key file with a ``.bak`` suffix.
+        The new key takes effect on the next IPv8 restart (or tunnel
+        reconnection).  Callers should restart the node afterwards.
+
+        Returns:
+            True if the rotation succeeded, False otherwise.
+        """
+        try:
+            from xdg import BaseDirectory
+            config_dir = BaseDirectory.save_config_path("quinkgl")
+        except ImportError:
+            config_dir = os.path.expanduser("~/.config/quinkgl")
+
+        key_file = os.path.join(config_dir, f"ipv8_quinkgl_{self.node_id}.pem")
+
+        # Backup existing key
+        if os.path.exists(key_file):
+            backup_path = key_file + f".bak.{int(time.time())}"
+            os.rename(key_file, backup_path)
+            logger.info(f"Backed up old key to {backup_path}")
+
+        # Generate new key
+        new_key = default_eccrypto.generate_key("medium")
+        pem_data = new_key.key_to_pem()
+
+        os.makedirs(config_dir, exist_ok=True)
+        with open(key_file, "wb") as fh:
+            fh.write(pem_data)
+
+        logger.info(f"Rotated identity for node {self.node_id}; new key written to {key_file}")
+
+        # If community is live, update in-memory key immediately
+        if self.community is not None and hasattr(self.community, "my_peer"):
+            try:
+                self.community.my_peer.key = new_key
+                logger.info(f"Updated in-memory peer key for {self.node_id}")
+            except Exception as exc:
+                logger.warning(f"Could not update in-memory key: {exc}")
+
+        return True
 
     async def _start_tunnel_fallback(self):
         """Start tunnel relay fallback."""
@@ -735,6 +797,7 @@ class GossipNode:
             via tunnel are treated identically by the aggregation layer.
             """
             from quinkgl.network.model_serializer import deserialize_model
+            from quinkgl.serialization import compress_weights, decompress_weights, CompressionConfig
             from quinkgl.gossip.protocol import ModelUpdateMessage
             from quinkgl.network.gossip_community import MAX_INCOMING_MESSAGE_SIZE
 
@@ -742,12 +805,14 @@ class GossipNode:
 
             def emit_drop(reason: str, peer_id: Optional[str] = None, security_event: Optional[str] = None):
                 if emitter:
+                    # T-OBS-17: Truncate identifiers to limit PII exposure
+                    _scrub = lambda v: v[:16] + "..." if v and len(v) > 16 else v
                     payload = {
-                        "node_id": self.node_id,
+                        "node_id": _scrub(self.node_id),
                         "reason": reason,
                     }
                     if peer_id is not None:
-                        payload["peer_id"] = peer_id
+                        payload["peer_id"] = _scrub(peer_id)
                     if security_event:
                         emitter.emit(security_event, payload)
                     emitter.emit("tunnel_payload_dropped", payload)
@@ -1146,9 +1211,9 @@ class GossipNode:
         # Emit node.stopped lifecycle event
         emitter = self.gl_node.aggregator.event_emitter
         if emitter:
-            uptime = time.time() - self._start_time if self._start_time else 0.0
+            uptime = time.monotonic() - self._start_time if self._start_time else 0.0
             emitter.emit("node.stopped", {
-                "node_id": self.node_id,
+                "node_id": _scrub_pii(self.node_id),
                 "total_rounds": self.gl_node.current_round,
                 "uptime_seconds": round(uptime, 1),
             })
@@ -1232,7 +1297,7 @@ class GossipNode:
         emitter = self.gl_node.aggregator.event_emitter
         if emitter:
             emitter.emit("telemetry.connected", {
-                "node_id": self.node_id,
+                "node_id": _scrub_pii(self.node_id),
                 "base_url": telemetry_client.base_url,
                 "heartbeat_interval": telemetry_client.heartbeat_interval,
             })
@@ -1243,6 +1308,9 @@ class GossipNode:
         """Check if node is using tunnel fallback."""
         return self.connection_mode == ConnectionMode.TUNNEL_RELAY
 
+    def get_connection_mode(self) -> ConnectionMode:
+        """Get current connection mode."""
+        return self.connection_mode
     def get_connection_mode(self) -> ConnectionMode:
         """Get current connection mode."""
         return self.connection_mode

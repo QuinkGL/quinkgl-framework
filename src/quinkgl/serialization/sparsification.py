@@ -11,7 +11,7 @@ References:
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -22,6 +22,26 @@ logger = logging.getLogger(__name__)
 class SparsificationConfig:
     top_k_ratio: float = 0.01
     method: str = "top_k"
+    min_sparsity: float = 0.0  # Minimum sparsity ratio (0-1)
+    max_sparsity: float = 0.99  # Maximum sparsity ratio (0-1)
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if not 0.0 <= self.top_k_ratio <= 1.0:
+            raise ValueError(
+                f"Invalid top_k_ratio: {self.top_k_ratio}. "
+                f"Must be between 0.0 and 1.0."
+            )
+        if self.method not in ["top_k", "random", "magnitude"]:
+            raise ValueError(
+                f"Invalid sparsification method: {self.method}. "
+                f"Must be 'top_k', 'random', or 'magnitude'."
+            )
+        if not 0.0 <= self.min_sparsity <= self.max_sparsity <= 1.0:
+            raise ValueError(
+                f"Invalid sparsity bounds: min={self.min_sparsity}, max={self.max_sparsity}. "
+                f"Must satisfy 0.0 <= min <= max <= 1.0."
+            )
 
 
 @dataclass
@@ -130,6 +150,11 @@ def compute_delta(
     """
     Compute the delta between current and base weights.
 
+    T-17: Both operands are cast to float64 before subtraction to avoid
+    catastrophic cancellation.  NumPy's vectorised subtraction already
+    uses pairwise summation internally, so no explicit Kahan loop is
+    needed for the element-wise path.
+
     Args:
         current_weights: Current model weights.
         base_weights: Previous (reference) weights.
@@ -197,6 +222,26 @@ def apply_delta(
         return result
     else:
         return base_weights
+
+
+def _pairwise_sum(values: np.ndarray) -> float:
+    """T-17: Pairwise (cascade) summation for improved numerical stability.
+
+    Recursively sums pairs of elements, reducing rounding error from
+    O(n·ε) to O(log(n)·ε).  Use when accumulating many scalar deltas
+    where numpy vectorised ops are not applicable.
+
+    For vectorised array operations, numpy already uses pairwise
+    summation internally, so this helper is only needed for manual
+    scalar loops.
+    """
+    if len(values) == 0:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    # Recursively sum pairs
+    mid = len(values) // 2
+    return _pairwise_sum(values[:mid]) + _pairwise_sum(values[mid:])
 
 
 def _sparsify_array(
@@ -273,7 +318,7 @@ def _desparsify_array(
     if isinstance(sparse_arr, dict) and sparse_arr.get("__sparse_weight__"):
         # S7b: new sparse format — reconstruct from indices + values.
         if base is None:
-            logger.warning(
+            logger.debug(
                 "desparsify: base_weights=None with sparse=True — non-sparse positions "
                 "will be filled with zeros. This is correct only when sparsification was "
                 "applied to a delta (not absolute weights). For absolute weight "
@@ -291,7 +336,7 @@ def _desparsify_array(
     else:
         # Legacy dense sparse format.
         if base is None:
-            logger.warning(
+            logger.debug(
                 "desparsify: base_weights=None with sparse=True — non-sparse positions "
                 "will be filled with zeros. This is correct only when sparsification was "
                 "applied to a delta (not absolute weights). For absolute weight "

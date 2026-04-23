@@ -6,7 +6,7 @@ Phase 6e is experimental; it must not be activated until 6a–6d are complete.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
@@ -122,9 +122,8 @@ class PrototypeStore:
         return json.dumps(data)
 
     @staticmethod
-    def parse_peer_prototypes(
-        peer_id: str, json_str: str
-    ) -> List[ClassPrototype]:
+    def parse_peer_prototypes(json_str: str) -> List[ClassPrototype]:
+        """TASK-043: Removed unused peer_id parameter."""
         data = json.loads(json_str)
         return [ClassPrototype.from_dict(d) for d in data]
 
@@ -161,6 +160,9 @@ class FedPACCollaborator:
         discrepancy: Dict[str, float],
         temperature: float = 1.0,
     ) -> Dict[str, float]:
+        """TASK-027: Added parameter validation."""
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
         if not discrepancy:
             return {}
         if temperature <= 0:

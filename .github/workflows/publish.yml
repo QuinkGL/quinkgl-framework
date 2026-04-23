@@ -7,9 +7,6 @@ on:
   # Manuel tetikleme (opsiyonel)
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   test:
     name: Run tests
@@ -78,7 +75,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
-    environment: testpypi
+    environment: testpypi  # T-DOPS-16: Configure this environment in GitHub repo settings to require manual approval
     permissions:
       id-token: write
 

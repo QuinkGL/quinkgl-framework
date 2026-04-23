@@ -18,7 +18,6 @@ from quinkgl.topology.base import (
     is_version_compatible,
 )
 from quinkgl.fingerprint.fingerprint import (
-    DataFingerprint,
     AffinityWeights,
 )
 
@@ -275,7 +274,12 @@ class AffinityTopology(TopologyStrategy):
                 random.sample(explore_pool_ids, min(n_explore, len(explore_pool_ids)))
             )
 
-        self._round_count += 1
+        # TOP-07: Use context.current_round instead of incrementing _round_count
+        # inside select_targets, decoupling round tracking from target selection.
+        if context.current_round > 0:
+            self._round_count = context.current_round
+        else:
+            self._round_count += 1
         self.exploration_ratio = max(
             self.exploration_min,
             self.exploration_ratio * self.exploration_decay,
