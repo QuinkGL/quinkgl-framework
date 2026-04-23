@@ -28,9 +28,18 @@ def _discover_nodes(work_dir: Path) -> list[tuple[str, Path]]:
     if not running_dir.exists():
         return []
     nodes = []
-    for p in running_dir.iterdir():
+    seen: set[str] = set()
+    # Prefer .sock over .json for the same node_id so a single running
+    # peer does not appear as two entries (spec §11.8).
+    for p in sorted(
+        running_dir.iterdir(),
+        key=lambda x: (x.stem, 0 if x.suffix == ".sock" else 1),
+    ):
         if p.suffix in {".sock", ".json"}:
-            nodes.append((p.stem, p))
+            nid = p.stem
+            if nid not in seen:
+                nodes.append((nid, p))
+                seen.add(nid)
     return nodes
 
 
@@ -58,6 +67,14 @@ def _read_state(path: Path) -> dict | None:
         try:
             return read_status_from_socket(str(path))
         except (FileNotFoundError, ConnectionRefusedError, TimeoutError, OSError):
+            # Server may have crashed; fall back to the sibling .json
+            # snapshot if it exists (spec §11.8 graceful degradation).
+            json_path = path.with_suffix(".json")
+            if json_path.exists():
+                try:
+                    return json.loads(json_path.read_text())
+                except Exception:
+                    return None
             return None
         except ValueError:
             # Server returned garbage — surface as "cannot read" rather

@@ -56,7 +56,9 @@ class _StubNode:
         self.state = SimpleNamespace(name="TRAINING")
         self.manifest = None
         self.gl_node = SimpleNamespace(
-            current_round=0, aggregator=SimpleNamespace(last_loss=None)
+            current_round=0,
+            aggregator=SimpleNamespace(last_loss=None),
+            model=model,
         )
         self.community = SimpleNamespace(peers=[], peers_discovered_count=0)
         self.ipv8_manager = SimpleNamespace(port=0)

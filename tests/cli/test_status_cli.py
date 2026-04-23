@@ -34,7 +34,7 @@ class TestStatus:
         (running / "alice.json").write_text(json.dumps(state))
         assert main(["--work-dir", str(tmp_path), "status", "--node-id", "alice"]) == SUCCESS
 
-    def status_multiple_nodes_no_id(self, tmp_path: Path) -> None:
+    def test_status_multiple_nodes_no_id(self, tmp_path: Path) -> None:
         running = tmp_path / "running"
         running.mkdir()
         for name in ("alice", "bob"):

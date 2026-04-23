@@ -95,6 +95,46 @@ def _build_standard_model(manifest: SwarmManifest):
     )
 
 
+def _ensure_model_wrapper(model: Any, manifest: SwarmManifest) -> Any:
+    """Wrap a raw PyTorch / TensorFlow model in the appropriate ModelWrapper.
+
+    When a Mode-B user script returns a bare ``nn.Module`` or Keras model,
+    ``GossipNode`` construction would fail because it expects ``get_weights``,
+    ``set_weights``, ``get_model_version``, and ``get_data_schema_hash``.
+    This helper inspects ``manifest.model.framework`` and duck-types the
+    returned object so the CLI layer can checkpoint/resume transparently.
+    """
+    from quinkgl.models.base import ModelWrapper
+
+    if isinstance(model, ModelWrapper):
+        return model
+
+    framework = "custom"
+    if manifest.model and manifest.model.framework:
+        framework = manifest.model.framework
+
+    if framework == "pytorch":
+        try:
+            import torch.nn as nn
+            if isinstance(model, nn.Module):
+                from quinkgl.models import PyTorchModel
+                return PyTorchModel(model)
+        except ImportError:
+            pass
+
+    if framework == "tensorflow":
+        try:
+            import tensorflow as tf
+            if isinstance(model, tf.keras.Model):
+                from quinkgl.models import TensorFlowModel
+                if TensorFlowModel is not None:
+                    return TensorFlowModel(model)
+        except ImportError:
+            pass
+
+    return model
+
+
 def _resolve_rounds(args_rounds: int | None, manifest_limit: int | None) -> int:
     """Return effective round count capped by manifest.round_limit (§10.5.4)."""
     requested = args_rounds
@@ -222,6 +262,11 @@ async def _async_run(args: argparse.Namespace) -> int:
         log.error("Model is None after loading.")
         return NODE_CONFIG_ERROR
 
+    # 2b. Wrap raw framework models so checkpoint/resume and GossipNode
+    # construction work without requiring the user script to import
+    # ModelWrapper subclasses (spec §10.5.1).
+    model = _ensure_model_wrapper(model, manifest)
+
     # 3. Build trusted_creator_pubkeys set for pinned policy
     trusted_pubkeys: set[bytes] | None = None
     if args.trusted_pubkey:
@@ -321,6 +366,7 @@ async def _async_run(args: argparse.Namespace) -> int:
         script_mod=script_mod,
         status_json_path=status_json_path,
         since_ts=since_ts,
+        start_round=start_round,
     )
 
     try:
@@ -470,6 +516,7 @@ def _build_on_round_end(
     script_mod: Any,
     status_json_path: Optional[Path],
     since_ts: str,
+    start_round: int = 0,
 ) -> Callable[[int, Dict[str, float]], "Any"]:
     """Compose the per-round callback that the CLI layer owns.
 
@@ -513,11 +560,15 @@ def _build_on_round_end(
 
         if ckpt_store is not None and (round_idx + 1) % 10 == 0:
             try:
-                _save_checkpoint(ckpt_store, node.model, round_number=round_idx)
+                _save_checkpoint(
+                    ckpt_store,
+                    node.gl_node.model,
+                    round_number=start_round + round_idx,
+                )
             except Exception as exc:
                 log.warning(
                     "periodic checkpoint save at round %d failed: %s",
-                    round_idx,
+                    start_round + round_idx,
                     exc,
                 )
 

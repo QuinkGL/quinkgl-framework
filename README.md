@@ -58,6 +58,40 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+### CLI (New in Phase 1)
+
+```bash
+# Install
+pip install quinkgl
+
+# Create a swarm manifest
+quinkgl manifest create \
+  --name my-swarm \
+  --task-type class \
+  --input-shape 3,224,224 \
+  --output-shape 10 \
+  --label-type integer \
+  --model-framework pytorch \
+  --model-arch-hash sha256:abc... \
+  --aggregation FedAvg \
+  --topology Random \
+  --output swarm.qgl
+
+# Verify the manifest
+quinkgl manifest verify swarm.qgl
+
+# Get a magnet URI
+quinkgl manifest magnet swarm.qgl
+
+# Scaffold a custom peer project
+quinkgl init --output-dir my-peer --template pytorch-vision --manifest swarm.qgl
+
+# Start a peer (dry-run first)
+quinkgl run --manifest swarm.qgl --data ./my_data --dry-run
+```
+
+### Python API
+
 ```python
 import asyncio
 import torch.nn as nn
