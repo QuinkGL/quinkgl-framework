@@ -115,7 +115,13 @@ from quinkgl.topology.base import (
 from quinkgl.topology.random import RandomTopology
 from quinkgl.topology.cyclon import CyclonTopology
 from quinkgl.topology.affinity import AffinityTopology
-from quinkgl.topology.spectral import SpectralAnalyzer, SpectralReport
+from quinkgl.topology.spectral import (
+    SpectralAnalyzer,
+    SpectralReport,
+    build_ring_adjacency,
+    build_complete_adjacency,
+    build_random_regular_adjacency,
+)
 
 # =============================================================================
 # FINGERPRINT - Privacy-preserving data distribution summaries
@@ -157,6 +163,8 @@ from quinkgl.manifest import (
     CollaborationPolicy,
     PersonalizationPolicy,
     PrototypePolicy,
+    SwarmManifest,
+    check_compatibility,
 )
 
 # =============================================================================
@@ -214,6 +222,9 @@ __all__ = [
     "AffinityTopology",
     "SpectralAnalyzer",
     "SpectralReport",
+    "build_ring_adjacency",
+    "build_complete_adjacency",
+    "build_random_regular_adjacency",
     "PeerInfo",
     "SelectionContext",
     
@@ -244,6 +255,8 @@ __all__ = [
     "CollaborationPolicy",
     "PersonalizationPolicy",
     "PrototypePolicy",
+    "SwarmManifest",
+    "check_compatibility",
 
     # Gossip
     "ModelAggregator",

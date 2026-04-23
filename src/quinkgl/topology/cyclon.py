@@ -237,9 +237,12 @@ class CyclonTopology(TopologyStrategy):
             peer_info: Peer requesting connection.
 
         Returns:
-            True if peer is compatible (same domain and schema).
+            True if peer is compatible (manifest ID when available, else domain + schema).
         """
-        # Check domain compatibility
+        # Manifest-ID takes priority when both sides have one
+        if context.my_manifest_id is not None and peer_info.manifest_id is not None:
+            return peer_info.manifest_id == context.my_manifest_id
+
         if peer_info.domain != context.my_domain:
             return False
 

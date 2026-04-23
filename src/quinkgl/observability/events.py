@@ -73,13 +73,7 @@ def _copy_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _snapshot_value(payload, set())
 
 
-class _UnreprSentinel:
-    """Sentinel for values that cannot be copied or represented safely."""
-    def __repr__(self):
-        return "<unrepresentable_value>"
-
-
-_UNREPR_SENTINEL = _UnreprSentinel()
+_UNREPR_FALLBACK = "<unrepresentable_value>"
 
 
 def _snapshot_value(value: Any, active: Set[int]) -> Any:
@@ -106,7 +100,14 @@ def _snapshot_value(value: Any, active: Set[int]) -> Any:
     try:
         return deepcopy(value)
     except Exception:
-        return _UNREPR_SENTINEL
+        # Preserve the value's own ``repr`` so observers (terminal UI,
+        # telemetry sink, debugger) get a human-readable breadcrumb rather
+        # than a generic sentinel — this is the contract the public test
+        # in ``tests/observability/test_terminal_events.py`` pins down.
+        try:
+            return repr(value)
+        except Exception:
+            return _UNREPR_FALLBACK
 
 
 class EventEmitter:

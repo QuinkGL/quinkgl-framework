@@ -366,3 +366,75 @@ class TestAffinityTopologySummary:
         assert "exploration_ratio" in summary
         assert "active_edges" in summary
         assert "top_peers" in summary
+
+
+# ── D: AffinityTopology — 40/30/15/15 weighting ───────────────────────────
+
+class TestAffinityWeights4031515:
+    def test_default_affinity_weights_match_documented_signal_mix(self):
+        """AffinityTopology must use 40 label / 30 feature / 15 gradient / 15 history."""
+        topo = AffinityTopology()
+        assert topo.affinity_weights.label    == pytest.approx(0.40)
+        assert topo.affinity_weights.feature  == pytest.approx(0.30)
+        assert topo.affinity_weights.gradient == pytest.approx(0.15)
+        assert topo.affinity_weights.history  == pytest.approx(0.15)
+
+    def test_weights_sum_to_one(self):
+        topo = AffinityTopology()
+        w = topo.affinity_weights
+        assert (w.label + w.feature + w.gradient + w.history) == pytest.approx(1.0)
+
+
+# ── D: All topologies — partition scenario (peer set = 0, 1) ──────────────
+
+class TestAffinityPartition:
+    @pytest.mark.asyncio
+    async def test_zero_peers_returns_empty(self):
+        topo = AffinityTopology()
+        ctx = _make_ctx(my_fp=_make_fp(), peers=[])
+        targets = await topo.select_targets(ctx, count=3)
+        assert targets == []
+
+    @pytest.mark.asyncio
+    async def test_one_peer_returns_at_most_one(self):
+        topo = AffinityTopology()
+        fp = _make_fp()
+        ctx = _make_ctx(
+            my_fp=fp,
+            peers=[PeerInfo(peer_id="only", domain="d", data_schema_hash="s",
+                            model_version="1.0.0", data_fingerprint=fp)],
+        )
+        targets = await topo.select_targets(ctx, count=3)
+        assert len(targets) <= 1
+
+
+# ── D: AffinityTopology — peer-id ordering not biased ─────────────────────
+
+class TestAffinityNoPeerIdBias:
+    @pytest.mark.asyncio
+    async def test_all_peers_reachable_via_exploration(self):
+        """With count=3 and full exploration, all peers must appear across many rounds."""
+        # With exploration_ratio=1.0 and count=3:
+        #   n_exploit = max(1, int(3*(1-1.0))) = 1  (exploit slot, but no scored peers above threshold)
+        #   n_explore = 2  → sampled randomly from unscored pool
+        # Over 30 rounds with 3 unscored peers, all should be seen.
+        topo = AffinityTopology(
+            exploration_initial=1.0,
+            exploration_min=1.0,
+            seed=42,
+        )
+        peers = [
+            PeerInfo(peer_id="aaa", domain="d", data_schema_hash="s", model_version="1.0.0"),
+            PeerInfo(peer_id="bbb", domain="d", data_schema_hash="s", model_version="1.0.0"),
+            PeerInfo(peer_id="ccc", domain="d", data_schema_hash="s", model_version="1.0.0"),
+        ]
+        fp = _make_fp()
+        ctx = _make_ctx(my_fp=fp, peers=peers)
+
+        seen = set()
+        for _ in range(30):
+            targets = await topo.select_targets(ctx, count=3)
+            seen.update(targets)
+
+        for pid in ("aaa", "bbb", "ccc"):
+            assert pid in seen, f"Peer {pid} never selected — ordering bias suspected"

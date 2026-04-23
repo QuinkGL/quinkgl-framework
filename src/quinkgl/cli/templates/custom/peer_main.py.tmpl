@@ -1,0 +1,23 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Canonical Mode C peer entry point for {project_name}."""
+import asyncio
+
+from quinkgl.manifest import SwarmManifest
+from quinkgl.node import GossipNode
+
+
+async def main():
+    manifest = SwarmManifest.from_file("{manifest_filename}")
+    node = GossipNode(manifest)
+    try:
+        await node.start()
+        await node.train(
+            build_model_fn=None,  # user wires this in peer_script
+            build_loaders_fn=None,  # user wires this in peer_script
+        )
+    finally:
+        await node.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

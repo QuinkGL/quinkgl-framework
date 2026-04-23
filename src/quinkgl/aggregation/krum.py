@@ -41,7 +41,7 @@ class Krum(AggregationStrategy):
         min_required = 2 * self.num_byzantines + 3
         if n < min_required:
             raise ValueError(
-                f"{strategy_name} requires n >= 2*f + 3 updates "
+                f"{strategy_name} requires n >= 2*f + 3 (2f+3) updates "
                 f"(n={n}, f={self.num_byzantines})"
             )
         return n

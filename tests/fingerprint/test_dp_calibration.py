@@ -142,10 +142,14 @@ class TestComputerNoise:
         )
         expected_sigma = cfg.effective_feature_noise_scale()
 
-        comp = FingerprintComputer(cfg)
-        # Constant moment at 0 → noised_mean IS the noise sample.
+        # Each sample uses a fresh computer so the per-instance privacy
+        # budget tracker (drained after the configured epsilon is spent) is
+        # irrelevant to the calibration check — we're measuring the noise
+        # *scale*, not the budget policy, and the latter is exercised
+        # elsewhere in this file.
         samples = []
         for _ in range(4000):
+            comp = FingerprintComputer(cfg)
             fp = comp.compute_from_label_counts(
                 {"a": 10}, feature_moments={"x": (0.0, 0.0)}
             )

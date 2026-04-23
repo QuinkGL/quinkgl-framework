@@ -1,0 +1,30 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Peer script stubs for {project_name}.
+
+This is a framework-agnostic custom template. Implement the functions below
+using any framework (PyTorch, TensorFlow, JAX, etc.).
+"""
+
+
+def build_model(input_shape: tuple, output_shape: tuple):
+    """Return a model compatible with your chosen framework.
+
+    Args:
+        input_shape: Shape of a single input sample.
+        output_shape: Shape of a single output sample.
+
+    Returns:
+        A model object. The exact type is up to you.
+    """
+    # User implements this with any framework.
+    raise NotImplementedError("build_model must be implemented by the user.")
+
+
+def build_loaders():
+    """Return training and validation data loaders.
+
+    Returns:
+        A tuple of (train_loader, val_loader). The exact types are up to you.
+    """
+    # User implements this with any framework.
+    raise NotImplementedError("build_loaders must be implemented by the user.")

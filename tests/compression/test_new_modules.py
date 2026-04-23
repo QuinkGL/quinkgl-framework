@@ -67,7 +67,7 @@ class TestConsensusTracker:
     def test_should_checkpoint(self):
         tracker = ConsensusTracker(checkpoint_interval=5)
         assert tracker.should_checkpoint(5) is True
-        tracker._last_checkpoint_round = 5
+        tracker._last_local_checkpoint_round = 5
         assert tracker.should_checkpoint(10) is True
         assert tracker.should_checkpoint(7) is False
 

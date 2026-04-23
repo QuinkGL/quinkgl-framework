@@ -50,6 +50,8 @@ class FedProx(FedAvg):
             mode: "training_time" (correct, default) or "weight_interpolation" (legacy)
             **kwargs: Additional arguments passed to FedAvg
         """
+        if mu <= 0:
+            raise ValueError(f"mu must be > 0 — got {mu}")
         super().__init__(**kwargs)
         self.mu = mu
         self.mode = mode

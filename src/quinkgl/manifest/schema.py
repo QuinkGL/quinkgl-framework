@@ -1,28 +1,102 @@
-"""
-Swarm Manifest — Data Policy Schema.
+"""Swarm Manifest — data-policy + Phase 1 schema v3 extensions.
 
-The manifest stores *policy*, not data.  Fingerprints are exchanged at
-runtime between peers.  This module defines the data_policy sub-schema
-that controls Layers 1–4 of the domain-aware collaboration system.
+The manifest is the canonical commitment that binds every in-scope field to a
+single SHA-256 hash; peers that disagree on any field produce different
+community IDs.  Spec:
 
-Section references: DOMAIN_AWARE_COLLABORATION_DESIGN.md §8.
+* §4.1 — CURRENT top-level keys (``schema_version``, ``model_arch_fingerprint``,
+  ``data_schema_hash``, ``aggregation``, ``topology``, ``compression``,
+  ``data_policy``).
+* §4.7 — Phase 1 additions: ``name``, ``description``, ``created_at``,
+  ``expires_at``, ``task``, ``model``, ``byzantine``, ``round_limit``,
+  ``bootstrap_peers``, ``tracker_urls``, ``creator_pubkey``, ``signature``.
+* §4.7.8 — validation order; each failure raises
+  ``ValueError(ERR_CODE, context_dict)`` using constants from
+  :mod:`quinkgl.manifest.errors`.
+* §5 — canonical encoding: deterministic sorted JSON, ``signature`` popped
+  per §5.3.
+
+Section references to ``DOMAIN_AWARE_COLLABORATION_DESIGN.md §8`` describe
+the data-policy sub-schema.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from quinkgl.manifest.errors import (
+    ERR_MANIFEST_EXPIRED,
+    ERR_MANIFEST_FIELD_INVALID,
+    ERR_MANIFEST_INVALID_JSON,
+    ERR_MANIFEST_MISSING_KEYS,
+    ERR_MANIFEST_NOT_OBJECT,
+    ERR_MANIFEST_SCHEMA_VERSION,
+    ERR_MANIFEST_UNKNOWN_KEYS,
+)
 
-# Schema version for manifest canonicalization. Incremented when the
-# canonical serialization contract changes in a backwards-incompatible way.
-MANIFEST_SCHEMA_VERSION = 2
+# `.qgl` files are small on-disk descriptors (§7).  A 1 MiB ceiling protects
+# naive loaders from pathological inputs without meaningfully constraining
+# legitimate manifests (real ones are well under 10 KiB).
+_QGL_MAX_BYTES = 1 * 1024 * 1024
+
+
+# Phase 1 bumps the manifest schema from 2 to 3.  Peers MUST reject unknown
+# versions via ``ERR_MANIFEST_SCHEMA_VERSION`` (§20.3); ``strict=False`` on
+# :meth:`SwarmManifest.from_dict` still accepts legacy v2 payloads for
+# backward-compat loading (§20.1).
+MANIFEST_SCHEMA_VERSION = 3
+_SUPPORTED_LEGACY_VERSIONS = frozenset({2})
+
 _VALID_NOISE_MECHANISMS = {"gaussian", "laplace", "none"}
 
+# RFC 3339 UTC profile: `YYYY-MM-DDThh:mm:ss[.fff]Z`.  Only UTC (`Z`) accepted
+# so that canonical bytes do not depend on local offsets.
+_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
+)
+_ARCH_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ED25519_PUBKEY_RE = re.compile(r"^ed25519:[0-9a-f]{64}$")
+_ED25519_SIG_RE = re.compile(r"^ed25519:[0-9a-f]{128}$")
+_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+_PEER_ID_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
-def _ensure_dict(data: Dict[str, Any], context: str) -> None:
+_TASK_TYPES = frozenset({"classification", "regression", "segmentation", "detection"})
+_LABEL_TYPES = frozenset({"integer", "float", "binary", "multiclass", "multilabel"})
+_FRAMEWORKS = frozenset({"pytorch", "tensorflow", "custom"})
+_PEER_KINDS = frozenset({"ipv8", "tunnel"})
+
+_NAME_MAX_LEN = 128
+_DESCRIPTION_MAX_LEN = 1024
+_TAGS_MAX = 16
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _raise(code: str, **ctx: Any) -> None:
+    raise ValueError(code, ctx)
+
+
+def _ensure_dict(data: Any, context: str) -> None:
     if not isinstance(data, dict):
-        raise ValueError(f"{context} must be a dict, got {type(data).__name__}")
+        raise ValueError(
+            f"{context} must be a dict, got {type(data).__name__}"
+        )
+
+
+def _ensure_dict_v3(data: Any, context: str) -> None:
+    """Phase-1 variant that emits a structured :data:`ERR_MANIFEST_NOT_OBJECT`
+    for the top-level object, preserving the legacy error shape elsewhere."""
+    if not isinstance(data, dict):
+        _raise(ERR_MANIFEST_NOT_OBJECT, context=context, got=type(data).__name__)
 
 
 def _check_allowed_keys(data: Dict[str, Any], allowed: set[str], context: str) -> None:
@@ -75,6 +149,41 @@ def _validate_bucket_spec(
             )
         if low >= high:
             raise ValueError(f"{context} bucket lower bound must be < upper bound")
+
+
+def _in_01(value: float, name: str) -> None:
+    if not (0.0 <= value <= 1.0):
+        raise ValueError(f"{name} must be in [0, 1], got {value}")
+
+
+def _parse_rfc3339(value: str, field_name: str) -> datetime:
+    """Parse an RFC 3339 UTC timestamp.  Raises ``ERR_MANIFEST_FIELD_INVALID``
+    on malformed input so the exact failure code is stable for callers."""
+    if not isinstance(value, str) or not _RFC3339_RE.match(value):
+        _raise(
+            ERR_MANIFEST_FIELD_INVALID,
+            field=field_name,
+            detail="not RFC 3339 UTC (expected ...Z)",
+            value=value,
+        )
+    try:
+        # ``fromisoformat`` accepts the trailing ``Z`` only on Python 3.11+.
+        # Normalise to ``+00:00`` for older interpreters.
+        normalised = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalised).astimezone(timezone.utc)
+    except ValueError:
+        _raise(
+            ERR_MANIFEST_FIELD_INVALID,
+            field=field_name,
+            detail="unparseable RFC 3339 timestamp",
+            value=value,
+        )
+        raise  # unreachable, helps type-checkers
+
+
+# ---------------------------------------------------------------------------
+# Data-policy sub-classes (CURRENT, unchanged apart from the shared constant)
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -168,12 +277,12 @@ class CollaborationPolicy:
         _in_01(self.affinity_gradient_w, "affinity_gradient_w")
         _in_01(self.affinity_history_w, "affinity_history_w")
         total_affinity = (
-            self.affinity_label_w +
-            self.affinity_feature_w +
-            self.affinity_gradient_w +
-            self.affinity_history_w
+            self.affinity_label_w
+            + self.affinity_feature_w
+            + self.affinity_gradient_w
+            + self.affinity_history_w
         )
-        if not (0.9 <= total_affinity <= 1.1):  # Allow small floating-point tolerance
+        if not (0.9 <= total_affinity <= 1.1):
             raise ValueError(
                 f"Affinity weights must sum to approximately 1.0, got {total_affinity}"
             )
@@ -586,18 +695,6 @@ class DataPolicy:
                 )
 
     def canonical_bytes(self) -> bytes:
-        """Deterministic serialization suitable for hashing.
-
-        Guarantees:
-          - Keys sorted recursively (``sort_keys=True``).
-          - No insignificant whitespace (fixed separators).
-          - Stable float repr via JSON's ``repr()`` formatting.
-          - Schema version prefixed so that hashes across schema versions
-            cannot collide.
-
-        Two semantically-equal policies produce identical bytes regardless
-        of how their sub-dicts were originally ordered.
-        """
         return json.dumps(
             self.to_dict(),
             sort_keys=True,
@@ -607,31 +704,311 @@ class DataPolicy:
         ).encode("utf-8")
 
     def manifest_hash(self) -> str:
-        """SHA-256 of the canonical manifest bytes, hex-encoded.
-
-        This commitment binds every in-scope policy field to a single hash.
-        Peers that disagree on any field produce different hashes and
-        therefore different community IDs (see ``generate_community_id``).
-        """
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
-def _in_01(value: float, name: str) -> None:
-    if not (0.0 <= value <= 1.0):
-        raise ValueError(f"{name} must be in [0, 1], got {value}")
+# ---------------------------------------------------------------------------
+# Phase 1 — v3 sub-schemas (§4.7.1, §4.7.2, §4.7.3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TaskSpec:
+    """Task contract (§4.7.1)."""
+
+    type: str = "classification"
+    input_shape: List[int] = field(default_factory=lambda: [1])
+    output_shape: List[int] = field(default_factory=lambda: [1])
+    label_type: str = "integer"
+    tags: List[str] = field(default_factory=list)
+
+    _ALLOWED_KEYS = {"type", "input_shape", "output_shape", "label_type", "tags"}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "input_shape": list(self.input_shape),
+            "output_shape": list(self.output_shape),
+            "label_type": self.label_type,
+            "tags": list(self.tags),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any, strict: bool = True) -> "TaskSpec":
+        if not isinstance(data, dict):
+            _raise(ERR_MANIFEST_FIELD_INVALID, field="task", detail="must be object")
+        if strict:
+            extra = set(data.keys()) - cls._ALLOWED_KEYS
+            if extra:
+                _raise(
+                    ERR_MANIFEST_UNKNOWN_KEYS,
+                    field="task",
+                    unknown=sorted(extra),
+                )
+            missing = cls._ALLOWED_KEYS - set(data.keys())
+            if missing:
+                _raise(
+                    ERR_MANIFEST_MISSING_KEYS,
+                    field="task",
+                    missing=sorted(missing),
+                )
+        return cls(
+            type=data.get("type", "classification"),
+            input_shape=list(data.get("input_shape", [1])),
+            output_shape=list(data.get("output_shape", [1])),
+            label_type=data.get("label_type", "integer"),
+            tags=list(data.get("tags", [])),
+        )
+
+    def validate(self) -> None:
+        if self.type not in _TASK_TYPES:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="task.type",
+                detail=f"must be one of {sorted(_TASK_TYPES)}",
+                value=self.type,
+            )
+        if self.label_type not in _LABEL_TYPES:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="task.label_type",
+                detail=f"must be one of {sorted(_LABEL_TYPES)}",
+                value=self.label_type,
+            )
+        for shape_name, shape in (
+            ("input_shape", self.input_shape),
+            ("output_shape", self.output_shape),
+        ):
+            if not isinstance(shape, list) or not shape:
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"task.{shape_name}",
+                    detail="must be a non-empty list of positive ints",
+                )
+            for dim in shape:
+                # ``bool`` is a subclass of ``int``; reject it explicitly to
+                # avoid "True == 1" masquerade.
+                if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                    _raise(
+                        ERR_MANIFEST_FIELD_INVALID,
+                        field=f"task.{shape_name}",
+                        detail="every dimension must be a positive int",
+                        value=dim,
+                    )
+        if not isinstance(self.tags, list) or len(self.tags) > _TAGS_MAX:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="task.tags",
+                detail=f"must be a list of at most {_TAGS_MAX} strings",
+            )
+        for tag in self.tags:
+            if not isinstance(tag, str) or not _TAG_RE.match(tag):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field="task.tags",
+                    detail="each tag must match ^[a-z0-9][a-z0-9-]{0,31}$",
+                    value=tag,
+                )
+
+
+def _default_arch_hash() -> str:
+    """Placeholder `sha256:` value used when no model is supplied.
+
+    It is syntactically valid so that a freshly constructed
+    :class:`SwarmManifest` passes `validate()`, but it is obviously not a real
+    architecture digest — callers building production manifests MUST replace
+    it via :func:`quinkgl.manifest.compute_arch_hash`.
+    """
+    return "sha256:" + "0" * 64
+
+
+@dataclass
+class ModelSpec:
+    """Model binding (§4.7.2)."""
+
+    framework: str = "custom"
+    arch_hash: str = field(default_factory=_default_arch_hash)
+    arch_spec: Optional[Dict[str, Any]] = None
+    genesis_weights_hash: Optional[str] = None
+    genesis_weights_url: Optional[str] = None
+
+    _ALLOWED_KEYS = {
+        "framework",
+        "arch_hash",
+        "arch_spec",
+        "genesis_weights_hash",
+        "genesis_weights_url",
+    }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "framework": self.framework,
+            "arch_hash": self.arch_hash,
+            "arch_spec": self.arch_spec,
+            "genesis_weights_hash": self.genesis_weights_hash,
+            "genesis_weights_url": self.genesis_weights_url,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any, strict: bool = True) -> "ModelSpec":
+        if not isinstance(data, dict):
+            _raise(ERR_MANIFEST_FIELD_INVALID, field="model", detail="must be object")
+        if strict:
+            extra = set(data.keys()) - cls._ALLOWED_KEYS
+            if extra:
+                _raise(ERR_MANIFEST_UNKNOWN_KEYS, field="model", unknown=sorted(extra))
+            # `arch_spec`, genesis_* may be null but keys MUST be present.
+            missing = cls._ALLOWED_KEYS - set(data.keys())
+            if missing:
+                _raise(
+                    ERR_MANIFEST_MISSING_KEYS,
+                    field="model",
+                    missing=sorted(missing),
+                )
+        return cls(
+            framework=data.get("framework", "custom"),
+            arch_hash=data.get("arch_hash", _default_arch_hash()),
+            arch_spec=data.get("arch_spec"),
+            genesis_weights_hash=data.get("genesis_weights_hash"),
+            genesis_weights_url=data.get("genesis_weights_url"),
+        )
+
+    def validate(self) -> None:
+        if self.framework not in _FRAMEWORKS:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="model.framework",
+                detail=f"must be one of {sorted(_FRAMEWORKS)}",
+                value=self.framework,
+            )
+        if not isinstance(self.arch_hash, str) or not _ARCH_HASH_RE.match(self.arch_hash):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="model.arch_hash",
+                detail="must match ^sha256:[0-9a-f]{64}$",
+                value=self.arch_hash,
+            )
+        if self.arch_spec is not None and not isinstance(self.arch_spec, dict):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="model.arch_spec",
+                detail="must be object or null",
+            )
+        if self.genesis_weights_hash is not None:
+            if not isinstance(self.genesis_weights_hash, str) or not _ARCH_HASH_RE.match(
+                self.genesis_weights_hash
+            ):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field="model.genesis_weights_hash",
+                    detail="must be null or match ^sha256:[0-9a-f]{64}$",
+                )
+        if self.genesis_weights_url is not None and not isinstance(
+            self.genesis_weights_url, str
+        ):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="model.genesis_weights_url",
+                detail="must be string or null",
+            )
+
+
+@dataclass
+class ByzantineSpec:
+    """Byzantine tolerance parameters (§4.7.3)."""
+
+    f: int = 0
+    enforce_n_gt_2f_plus_2: bool = False
+
+    _ALLOWED_KEYS = {"f", "enforce_n_gt_2f_plus_2"}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"f": self.f, "enforce_n_gt_2f_plus_2": self.enforce_n_gt_2f_plus_2}
+
+    @classmethod
+    def from_dict(cls, data: Any, strict: bool = True) -> "ByzantineSpec":
+        if not isinstance(data, dict):
+            _raise(ERR_MANIFEST_FIELD_INVALID, field="byzantine", detail="must be object")
+        if strict:
+            extra = set(data.keys()) - cls._ALLOWED_KEYS
+            if extra:
+                _raise(
+                    ERR_MANIFEST_UNKNOWN_KEYS,
+                    field="byzantine",
+                    unknown=sorted(extra),
+                )
+        return cls(
+            f=int(data.get("f", 0)),
+            enforce_n_gt_2f_plus_2=bool(data.get("enforce_n_gt_2f_plus_2", False)),
+        )
+
+    def validate(self) -> None:
+        if isinstance(self.f, bool) or not isinstance(self.f, int) or self.f < 0:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="byzantine.f",
+                detail="must be non-negative int",
+                value=self.f,
+            )
+        if not isinstance(self.enforce_n_gt_2f_plus_2, bool):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="byzantine.enforce_n_gt_2f_plus_2",
+                detail="must be bool",
+            )
+
+
+# ---------------------------------------------------------------------------
+# SwarmManifest — v3 top-level
+# ---------------------------------------------------------------------------
+
+
+_V3_ALLOWED_TOP_KEYS = {
+    # §4.1 legacy keys
+    "schema_version",
+    "model_arch_fingerprint",
+    "data_schema_hash",
+    "aggregation",
+    "topology",
+    "compression",
+    "data_policy",
+    # §4.7 additions
+    "name",
+    "description",
+    "created_at",
+    "expires_at",
+    "task",
+    "model",
+    "byzantine",
+    "round_limit",
+    "bootstrap_peers",
+    "tracker_urls",
+    "creator_pubkey",
+    "signature",
+}
+
+_V3_REQUIRED_TOP_KEYS = {
+    "schema_version",
+    "model_arch_fingerprint",
+    "data_schema_hash",
+    "aggregation",
+    "topology",
+    "compression",
+    "data_policy",
+    "name",
+    "created_at",
+    "task",
+    "model",
+}
 
 
 @dataclass
 class SwarmManifest:
-    """Complete swarm manifest binding all collaboration policies.
+    """Complete swarm manifest binding every in-scope policy field (§4)."""
 
-    This is the canonical commitment that peers use to derive community IDs.
-    Any difference in any field produces a different manifest hash and thus
-    a different overlay network.
-    """
     schema_version: int = MANIFEST_SCHEMA_VERSION
-    model_arch_fingerprint: str = ""  # Hash of model architecture
-    data_schema_hash: str = ""  # Hash of data schema
+    model_arch_fingerprint: str = ""  # Hash of model architecture (legacy).
+    data_schema_hash: str = ""
     aggregation_name: str = "FedAvg"
     aggregation_params: Dict[str, Any] = field(default_factory=dict)
     topology_name: str = "Random"
@@ -639,6 +1016,24 @@ class SwarmManifest:
     compression_enabled: bool = False
     compression_params: Dict[str, Any] = field(default_factory=dict)
     data_policy: DataPolicy = field(default_factory=DataPolicy)
+
+    # --- §4.7 Phase 1 additions ------------------------------------------------
+    name: str = "unnamed"
+    description: str = ""
+    created_at: str = "1970-01-01T00:00:00Z"
+    expires_at: Optional[str] = None
+    task: TaskSpec = field(default_factory=TaskSpec)
+    model: ModelSpec = field(default_factory=ModelSpec)
+    byzantine: ByzantineSpec = field(default_factory=ByzantineSpec)
+    round_limit: Optional[int] = None
+    bootstrap_peers: List[Dict[str, Any]] = field(default_factory=list)
+    tracker_urls: List[List[str]] = field(default_factory=list)
+    creator_pubkey: Optional[str] = None  # §4.7.6 (Phase 2 signing target)
+    signature: Optional[str] = None  # §4.7.7 — EXCLUDED from canonical bytes
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -658,31 +1053,66 @@ class SwarmManifest:
                 "params": self.compression_params,
             },
             "data_policy": self.data_policy.to_dict(),
+            "name": self.name,
+            "description": self.description,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "task": self.task.to_dict(),
+            "model": self.model.to_dict(),
+            "byzantine": self.byzantine.to_dict(),
+            "round_limit": self.round_limit,
+            "bootstrap_peers": [dict(p) for p in self.bootstrap_peers],
+            "tracker_urls": [list(tier) for tier in self.tracker_urls],
+            "creator_pubkey": self.creator_pubkey,
+            "signature": self.signature,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], strict: bool = True) -> "SwarmManifest":
-        _ensure_dict(data, "SwarmManifest")
-        allowed = {
-            "schema_version",
-            "model_arch_fingerprint",
-            "data_schema_hash",
-            "aggregation",
-            "topology",
-            "compression",
-            "data_policy",
-        }
-        if strict:
-            _check_allowed_keys(data, allowed, "SwarmManifest")
-            _check_required_keys(data, allowed, "SwarmManifest")
-            _require_schema_version(data, MANIFEST_SCHEMA_VERSION, "SwarmManifest")
+        """Load a manifest dict.
 
-        agg_data = data.get("aggregation", {})
-        topo_data = data.get("topology", {})
-        comp_data = data.get("compression", {})
+        When ``strict=True`` enforces the §4.7.8 validation order and emits
+        structured ``ERR_*`` codes on failure.  When ``strict=False`` also
+        accepts a legacy ``schema_version=2`` payload, filling any missing v3
+        keys with safe defaults (see §20.1, §20.2).
+        """
+        _ensure_dict_v3(data, "SwarmManifest")
+
+        version = data.get("schema_version")
+        if strict:
+            if version != MANIFEST_SCHEMA_VERSION:
+                _raise(
+                    ERR_MANIFEST_SCHEMA_VERSION,
+                    expected=MANIFEST_SCHEMA_VERSION,
+                    got=version,
+                )
+            extra = set(data.keys()) - _V3_ALLOWED_TOP_KEYS
+            if extra:
+                _raise(ERR_MANIFEST_UNKNOWN_KEYS, unknown=sorted(extra))
+            missing = _V3_REQUIRED_TOP_KEYS - set(data.keys())
+            if missing:
+                _raise(ERR_MANIFEST_MISSING_KEYS, missing=sorted(missing))
+        else:
+            if version not in (MANIFEST_SCHEMA_VERSION, *_SUPPORTED_LEGACY_VERSIONS):
+                _raise(
+                    ERR_MANIFEST_SCHEMA_VERSION,
+                    expected=MANIFEST_SCHEMA_VERSION,
+                    supported=sorted({MANIFEST_SCHEMA_VERSION, *_SUPPORTED_LEGACY_VERSIONS}),
+                    got=version,
+                )
+
+        agg_data = data.get("aggregation", {}) or {}
+        topo_data = data.get("topology", {}) or {}
+        comp_data = data.get("compression", {}) or {}
         policy_data = data.get("data_policy", DataPolicy().to_dict())
 
-        return cls(
+        # In ``strict=False`` mode, fall back to default instances for any
+        # missing v3 sub-blocks so that legacy v2 payloads load cleanly.
+        task_data = data.get("task", TaskSpec().to_dict())
+        model_data = data.get("model", ModelSpec().to_dict())
+        byz_data = data.get("byzantine", ByzantineSpec().to_dict())
+
+        instance = cls(
             schema_version=data.get("schema_version", MANIFEST_SCHEMA_VERSION),
             model_arch_fingerprint=data.get("model_arch_fingerprint", ""),
             data_schema_hash=data.get("data_schema_hash", ""),
@@ -692,15 +1122,41 @@ class SwarmManifest:
             topology_params=topo_data.get("params", {}),
             compression_enabled=comp_data.get("enabled", False),
             compression_params=comp_data.get("params", {}),
-            data_policy=DataPolicy.from_dict(policy_data, strict=strict),
+            data_policy=DataPolicy.from_dict(
+                policy_data, strict=strict and version == MANIFEST_SCHEMA_VERSION
+            ),
+            name=data.get("name", "unnamed"),
+            description=data.get("description", ""),
+            created_at=data.get("created_at", "1970-01-01T00:00:00Z"),
+            expires_at=data.get("expires_at"),
+            task=TaskSpec.from_dict(task_data, strict=strict),
+            model=ModelSpec.from_dict(model_data, strict=strict),
+            byzantine=ByzantineSpec.from_dict(byz_data, strict=strict),
+            round_limit=data.get("round_limit"),
+            bootstrap_peers=list(data.get("bootstrap_peers", [])),
+            tracker_urls=list(data.get("tracker_urls", [])),
+            creator_pubkey=data.get("creator_pubkey"),
+            signature=data.get("signature"),
         )
 
+        if strict:
+            instance._validate_v3_fields()
+
+        return instance
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
     def validate(self) -> None:
-        """Validate all manifest fields."""
+        """Full v3 validation — used by publishers and the strict join path."""
         if self.schema_version != MANIFEST_SCHEMA_VERSION:
             raise ValueError(
                 f"schema_version must be {MANIFEST_SCHEMA_VERSION}, got {self.schema_version}"
             )
+        self._validate_v3_fields()
+        # Legacy non-empty checks: kept for backward compatibility with the
+        # audit suite that inspects these specific messages.
         if not self.model_arch_fingerprint:
             raise ValueError("model_arch_fingerprint must be non-empty")
         if not self.data_schema_hash:
@@ -714,10 +1170,153 @@ class SwarmManifest:
                 f"manifest size {len(manifest_bytes)} bytes exceeds maximum {MAX_MANIFEST_SIZE} bytes"
             )
 
+    def _validate_v3_fields(self) -> None:
+        """Run the §4.7.8 per-field checks — used by strict loading and by
+        :meth:`validate`.  The legacy ``model_arch_fingerprint`` /
+        ``data_schema_hash`` non-empty checks stay in :meth:`validate`."""
+
+        # name
+        if (
+            not isinstance(self.name, str)
+            or not (1 <= len(self.name) <= _NAME_MAX_LEN)
+            or any(ord(c) < 0x20 for c in self.name)
+        ):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="name",
+                detail=f"1-{_NAME_MAX_LEN} UTF-8 chars, no control chars",
+                value=self.name,
+            )
+        # description
+        if not isinstance(self.description, str) or len(self.description) > _DESCRIPTION_MAX_LEN:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="description",
+                detail=f"0-{_DESCRIPTION_MAX_LEN} chars string",
+            )
+        # created_at / expires_at
+        created = _parse_rfc3339(self.created_at, "created_at")
+        expires = None
+        if self.expires_at is not None:
+            expires = _parse_rfc3339(self.expires_at, "expires_at")
+            if expires <= created:
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field="expires_at",
+                    detail="must be strictly after created_at",
+                )
+            if expires < datetime.now(timezone.utc):
+                _raise(ERR_MANIFEST_EXPIRED, expires_at=self.expires_at)
+
+        # round_limit
+        if self.round_limit is not None and (
+            isinstance(self.round_limit, bool)
+            or not isinstance(self.round_limit, int)
+            or self.round_limit < 0
+        ):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="round_limit",
+                detail="must be null or non-negative int",
+                value=self.round_limit,
+            )
+
+        # creator_pubkey / signature (Phase 2 fields, syntactically checked now)
+        if self.creator_pubkey is not None:
+            if not isinstance(self.creator_pubkey, str) or not _ED25519_PUBKEY_RE.match(
+                self.creator_pubkey
+            ):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field="creator_pubkey",
+                    detail="must match ^ed25519:[0-9a-f]{64}$",
+                )
+        if self.signature is not None:
+            if not isinstance(self.signature, str) or not _ED25519_SIG_RE.match(self.signature):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field="signature",
+                    detail="must match ^ed25519:[0-9a-f]{128}$",
+                )
+
+        # bootstrap_peers
+        if not isinstance(self.bootstrap_peers, list):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="bootstrap_peers",
+                detail="must be a list",
+            )
+        for i, peer in enumerate(self.bootstrap_peers):
+            if not isinstance(peer, dict):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"bootstrap_peers[{i}]",
+                    detail="must be an object",
+                )
+            if peer.get("kind") not in _PEER_KINDS:
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"bootstrap_peers[{i}].kind",
+                    detail=f"must be one of {sorted(_PEER_KINDS)}",
+                    value=peer.get("kind"),
+                )
+            peer_id = peer.get("peer_id")
+            if not isinstance(peer_id, str) or not _PEER_ID_HEX_RE.match(peer_id):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"bootstrap_peers[{i}].peer_id",
+                    detail="must be hex string",
+                )
+            addr = peer.get("address")
+            if not isinstance(addr, str) or ":" not in addr:
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"bootstrap_peers[{i}].address",
+                    detail="must be 'host:port'",
+                )
+
+        # tracker_urls — two-level array per §4.7.5.
+        if not isinstance(self.tracker_urls, list):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="tracker_urls",
+                detail="must be a two-level list (tiers -> urls)",
+            )
+        for i, tier in enumerate(self.tracker_urls):
+            if not isinstance(tier, list):
+                _raise(
+                    ERR_MANIFEST_FIELD_INVALID,
+                    field=f"tracker_urls[{i}]",
+                    detail="each tier must be a list of URL strings",
+                )
+            for j, url in enumerate(tier):
+                if not isinstance(url, str) or not url:
+                    _raise(
+                        ERR_MANIFEST_FIELD_INVALID,
+                        field=f"tracker_urls[{i}][{j}]",
+                        detail="must be a non-empty string",
+                    )
+
+        # nested v3 blocks
+        self.task.validate()
+        self.model.validate()
+        self.byzantine.validate()
+
+    # ------------------------------------------------------------------
+    # Canonical encoding / hashing (§5)
+    # ------------------------------------------------------------------
+
     def canonical_bytes(self) -> bytes:
-        """Deterministic serialization suitable for hashing."""
+        """Deterministic SHA-256-safe serialization (§5.1).
+
+        Per the §5.1 Phase 1 delta, the ``signature`` field is popped BEFORE
+        hashing — it is the value being signed so it cannot be included in
+        the input.  ``creator_pubkey`` IS retained (§5.3).
+        """
+        d = self.to_dict()
+        d.pop("signature", None)
         return json.dumps(
-            self.to_dict(),
+            d,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -725,5 +1324,179 @@ class SwarmManifest:
         ).encode("utf-8")
 
     def manifest_hash(self) -> str:
-        """SHA-256 of the canonical manifest bytes, hex-encoded."""
+        """SHA-256 hex of :meth:`canonical_bytes` (see §6)."""
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    # ------------------------------------------------------------------
+    # `.qgl` file format (§7, §10.2)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_file(
+        cls,
+        path: Any,
+        *,
+        strict: bool = True,
+    ) -> "SwarmManifest":
+        """Load a manifest from a UTF-8 `.qgl` file.
+
+        The file MUST be ≤ 1 MiB and MUST NOT begin with a UTF-8 BOM
+        (§7).  Malformed JSON raises ``ValueError(ERR_MANIFEST_INVALID_JSON,
+        …)``.  Missing files raise :class:`FileNotFoundError` — that is the
+        standard Python signal for "not there" and does not need its own
+        manifest-specific code.
+        """
+        # Import here to avoid a hard ``pathlib`` dependency at module load
+        # time on restricted runtimes.
+        from pathlib import Path as _Path
+
+        p = _Path(path)
+        try:
+            size = p.stat().st_size
+        except FileNotFoundError:
+            raise
+
+        if size > _QGL_MAX_BYTES:
+            _raise(
+                ERR_MANIFEST_INVALID_JSON,
+                path=str(p),
+                detail=f"file exceeds {_QGL_MAX_BYTES} byte limit",
+                size=size,
+            )
+
+        raw = p.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            _raise(
+                ERR_MANIFEST_INVALID_JSON,
+                path=str(p),
+                detail="UTF-8 BOM not permitted in .qgl files",
+            )
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            _raise(
+                ERR_MANIFEST_INVALID_JSON,
+                path=str(p),
+                detail=f"not valid UTF-8: {exc}",
+            )
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            _raise(
+                ERR_MANIFEST_INVALID_JSON,
+                path=str(p),
+                detail=str(exc),
+                line=exc.lineno,
+                col=exc.colno,
+            )
+
+        instance = cls.from_dict(data, strict=strict)
+        # `from_dict(strict=True)` already runs `_validate_v3_fields`; re-run
+        # full `validate()` on the strict path so legacy non-empty checks are
+        # enforced too.
+        if strict:
+            instance.validate()
+        return instance
+
+    def to_magnet(
+        self,
+        *,
+        trackers: Optional[List[str]] = None,
+        bootstrap_peers: Optional[List[str]] = None,
+        protocol_version: int = 1,
+    ) -> str:
+        """Render this manifest as a canonical ``quinkgl:?…`` magnet URI.
+
+        ``swarm_id`` is :meth:`manifest_hash` decoded to 32 bytes; the
+        display name defaults to :attr:`name` when it differs from the
+        scaffold placeholder ``"unnamed"``.  ``trackers`` and
+        ``bootstrap_peers`` override (rather than extend) the manifest's
+        ``tracker_urls`` / ``bootstrap_peers`` when supplied — callers that
+        want the manifest's built-in lists can pass ``None`` and the method
+        will fall back to them.
+        """
+        # Local import avoids a circular module-level dependency: magnet.py
+        # imports error codes from errors.py and does not touch schema.
+        from quinkgl.manifest.magnet import MagnetLink, format_magnet
+
+        swarm_id_hex = self.manifest_hash()
+        swarm_id = bytes.fromhex(swarm_id_hex)
+
+        if trackers is None:
+            # Flatten the two-level tracker_urls tier list into a single
+            # ordered tier for the magnet URI (tiers are a BEP-12 concept
+            # and we don't encode them in the magnet payload).
+            trackers = [url for tier in self.tracker_urls for url in tier]
+        if bootstrap_peers is None:
+            bootstrap_peers = [
+                p.get("address", "") for p in self.bootstrap_peers if p.get("address")
+            ]
+
+        display_name = self.name if self.name and self.name != "unnamed" else None
+
+        link = MagnetLink(
+            swarm_id=swarm_id,
+            display_name=display_name,
+            keywords=[],
+            trackers=list(trackers),
+            bootstrap_peers=list(bootstrap_peers),
+            protocol_version=protocol_version,
+        )
+        return format_magnet(link)
+
+    def to_file(
+        self,
+        path: Any,
+        *,
+        pretty: bool = True,
+    ) -> None:
+        """Atomically write the manifest as a `.qgl` file.
+
+        Uses the tmp-file + ``os.replace`` pattern so an interrupted write
+        cannot leave the destination in a partial state.  Writes UTF-8
+        without a BOM and without a trailing newline (except in pretty
+        mode, where ``json.dumps(indent=2)`` emits one naturally — we keep
+        the trailing newline for human-readability).
+
+        ``pretty=True`` emits 2-space indent + per-line newlines; consumers
+        MUST re-canonicalise before hashing (§7).
+
+        ``pretty=False`` emits the exact bytes produced by
+        :meth:`canonical_bytes` — byte-identical to the hash input.
+        """
+        from pathlib import Path as _Path
+
+        p = _Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        if pretty:
+            payload = json.dumps(
+                self.to_dict(),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8") + b"\n"
+        else:
+            payload = self.canonical_bytes()
+
+        # Atomic write: same-directory tmp file guarantees ``os.replace`` is
+        # on the same filesystem (rename is atomic only within a filesystem).
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:  # pragma: no cover — best-effort on exotic FS
+                    pass
+            os.replace(tmp, p)
+        except Exception:
+            # Clean up the partial tmp file so callers never see stale
+            # ``.qgl.tmp`` fragments after a failed write.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
