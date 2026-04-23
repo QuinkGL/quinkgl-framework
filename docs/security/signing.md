@@ -60,7 +60,7 @@ quinkgl manifest create \
   --output-shape 10 \
   --label-type integer \
   --model-framework pytorch \
-  --model-arch-hash sha256:... \
+  --model-arch-hash sha256:7f2c1a9b3e4d0123456789abcdef0123456789abcdef0123456789abcdef0123 \
   --aggregation FedAvg \
   --topology Random \
   --sign-with creator.pem \
