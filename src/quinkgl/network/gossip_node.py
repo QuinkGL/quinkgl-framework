@@ -51,6 +51,27 @@ from quinkgl.network.gossip_community import MAX_ROUND_SKIP
 _VALID_TRUST_POLICIES = frozenset({"open", "tofu", "pinned"})
 
 
+def _coerce_trust_policy(value: Any) -> str:
+    """Accept either a :class:`quinkgl.gossip.TrustPolicy` or a bare string.
+
+    Returns the lowercase ``str`` form so every downstream check can
+    keep comparing against string literals.  Raising up-front yields a
+    clearer error than failing deep inside the reactor with a
+    ``KeyError`` when someone passes ``TrustPolicy.TOFU`` as an int-like
+    object.
+    """
+    from quinkgl.gossip.trust import TrustPolicy
+
+    if isinstance(value, TrustPolicy):
+        return value.value
+    if isinstance(value, str):
+        return value
+    raise ValueError(
+        f"invalid trust_policy {value!r}; expected one of "
+        f"{{'open','tofu','pinned'}} or a quinkgl.gossip.TrustPolicy member"
+    )
+
+
 def _class_name_matches(instance: Any, expected_name: str) -> bool:
     """Match ``type(instance).__name__`` against a manifest-declared name.
 
@@ -311,6 +332,7 @@ class GossipNode:
                 node_id=node_id,
             )
 
+        trust_policy = _coerce_trust_policy(trust_policy)
         if trust_policy not in _VALID_TRUST_POLICIES:
             raise ValueError(
                 f"invalid trust_policy {trust_policy!r}; expected one of "
@@ -351,6 +373,37 @@ class GossipNode:
                 ),
                 node_id=node_id,
             )
+
+        # TOFU enforcement (spec §15.1).  Only runs when:
+        #   1. trust_policy == "tofu"
+        #   2. a manifest is present and signed (creator_pubkey set)
+        # The cache lookup is synchronous by design — a conflict MUST
+        # abort ``__init__`` before IPv8 is spun up so the node never
+        # advertises itself in a swarm bound to a different creator.
+        self._tofu_cache = None  # late-bound, populated on conflict/record
+        if trust_policy == "tofu" and has_manifest and manifest.creator_pubkey:
+            from quinkgl.network.tofu import TofuCache, default_tofu_cache_path
+
+            cache_path = default_tofu_cache_path()
+            try:
+                tofu_cache = TofuCache(cache_path)
+                tofu_cache.record_or_validate(
+                    manifest.manifest_hash(), manifest.creator_pubkey
+                )
+                self._tofu_cache = tofu_cache
+            except ValueError as exc:
+                # TofuCache.record_or_validate raises
+                # ``ValueError(ERR_TRUST_TOFU_CONFLICT, {...})`` on
+                # creator-key divergence; re-raise via the node-level
+                # helper so the error matches the shape of every other
+                # ``ERR_NODE_*`` / ``ERR_TRUST_*`` raised from __init__.
+                from quinkgl.manifest.errors import ERR_TRUST_TOFU_CONFLICT
+
+                if exc.args and exc.args[0] == ERR_TRUST_TOFU_CONFLICT:
+                    raise
+                # Something else went wrong (e.g. bad creator_pubkey
+                # value); surface it directly.
+                raise
 
         # Derive a legacy `domain` string for code paths that still read
         # ``self.domain`` (community-id generation, tunnel announce).  When
