@@ -16,6 +16,51 @@ from quinkgl.topology.base import PeerInfo
 
 logger = logging.getLogger(__name__)
 
+
+class RandomSampler:
+    """Sample peers uniformly at random.
+
+    Args:
+        replacement: If True, sample with replacement (duplicates allowed).
+    """
+
+    def __init__(self, replacement: bool = False) -> None:
+        self.replacement = replacement
+
+    def sample(
+        self,
+        peers: list,
+        k: int,
+        seed: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        rng = __import__("random").Random(seed)
+        if not peers:
+            return []
+        if self.replacement:
+            return rng.choices(peers, k=k)
+        return rng.sample(peers, min(k, len(peers)))
+
+
+class DegreeWeightedSampler:
+    """Sample peers with probability proportional to their degree."""
+
+    def sample(
+        self,
+        peers: list,
+        k: int,
+        degrees: Optional[dict] = None,
+        seed: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        rng = __import__("random").Random(seed)
+        if not peers:
+            return []
+        degrees = degrees or {}
+        weights = [degrees.get(p, 1) for p in peers]
+        return rng.choices(peers, weights=weights, k=min(k, len(peers)))
+
+
 class PeerSampler:
     """
     Manages a partial view of the network with age-based eviction.

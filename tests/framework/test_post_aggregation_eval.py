@@ -43,11 +43,10 @@ CIFAR10_ROOT = "/tmp/cifar10_data"
 # ---------------------------------------------------------------------------
 # Tiny CNN  (~18 k params)
 # ---------------------------------------------------------------------------
-def _get_tiny_nn_c():
-   """15: Defer torch.nn import until needed."""
-    mport torch.n as nn
-    
-    class Tin
+def _get_tiny_cnn_class():
+    """T15: Defer torch.nn import until needed."""
+    import torch.nn as nn
+
     class TinyCNN(nn.Module):
         def __init__(self):
             super().__init__()
@@ -56,12 +55,12 @@ def _get_tiny_nn_c():
                 nn.Conv2d(8, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
                 nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(2),
             )
-        self.classifier = nn.Linear(16 * 2 * 2, 10)
-    
-    def     forward(self, x):
-    
+            self.classifier = nn.Linear(16 * 2 * 2, 10)
+
+        def forward(self, x):
+            return self.classifier(self.features(x).flatten(1))
+
     return TinyCNN
-        return self.classifier(self.features(x).flatten(1))
 
 
 # ---------------------------------------------------------------------------

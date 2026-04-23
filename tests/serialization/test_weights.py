@@ -6,6 +6,8 @@ import pytest
 from quinkgl.serialization.weights import (
     deserialize_numpy_weights,
     serialize_numpy_weights,
+    serialize,
+    deserialize,
 )
 
 
@@ -18,13 +20,11 @@ def test_weight_serialization_round_trip():
 
 
 def test_serialization_import_surfaces_reexport_weight_helpers():
-    assert serialization_pkg.serialize is pkg_serialize is serialize
-    assert serialization_pkg.deserialize is pkg_deserialize is deserialize
-    assert legacy_serialize is serialize
-    assert legacy_deserialize is deserialize
-
-
-def test_ssert np.array_equal(array, data[index])
+    import quinkgl.serialization as serialization_pkg
+    from quinkgl.serialization.weights import serialize as weights_serialize
+    from quinkgl.serialization.weights import deserialize as weights_deserialize
+    assert serialization_pkg.serialize is weights_serialize
+    assert serialization_pkg.deserialize is weights_deserialize
 
 
 def test_deprecated_aliases_emit_deprecation_warning():

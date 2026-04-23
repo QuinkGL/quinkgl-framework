@@ -156,13 +156,3 @@ data/
 # Tool configs
 .config/
 QuinkGL/docs-md/
-
-
-
-# Excluded from this branch
-.dockerignore
-API.md
-Makefile
-audits/
-chat.py
-scripts/
