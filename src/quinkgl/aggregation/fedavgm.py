@@ -55,8 +55,12 @@ class FedAvgM(AggregationStrategy):
         weights_list = [self.compute_weight(u) for u in updates]
         total_weight = sum(weights_list)
 
+        # AGG-TASK-13: Unified total weight zero behaviour - use uniform weight fallback
         if total_weight == 0:
-            raise ValueError("Total weight is zero, cannot aggregate")
+            total_weight = len(updates)
+        if total_weight == 0:
+            # Fallback to 1 to avoid division by zero (shouldn't happen with valid updates)
+            total_weight = 1
 
         first_weights = updates[0].weights
 
@@ -71,6 +75,9 @@ class FedAvgM(AggregationStrategy):
 
         # Apply momentum
         if self.global_weights is None:
+            # AGG-TASK-06: First round semantics - no momentum, just plain average
+            # According to FedAvgM paper (https://arxiv.org/abs/1909.03083),
+            # momentum buffer starts at zero, so first round is plain FedAvg
             self.global_weights = deepcopy(averaged)
             self.momentum_buffer = self._zeros_like(averaged)
         else:

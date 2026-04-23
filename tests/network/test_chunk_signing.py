@@ -25,15 +25,19 @@ from quinkgl.network.gossip_community import (
 # ---------------------------------------------------------------------------
 # Helpers — use ipv8 crypto if available, else skip
 # ---------------------------------------------------------------------------
+import pytest
+
+# T10: Skip test if ipv8 is not installed
+pytest.importorskip("ipv8")
+
 
 def _generate_keypair():
     """Generate an IPv8-compatible EC key pair for testing."""
-    try:
-        from ipv8.keyvault.crypto import default_eccrypto
-        private_key = default_eccrypto.generate_key("curve25519")
-        return private_key
-    except Exception:
-        pytest.skip("ipv8 crypto not available")
+    from ipv8.keyvault.crypto import default_eccrypto
+    private_key = default_eccrypto.generate_key("curve25519")
+    return private_key
+    # except Exception:
+    #     pytest.skip("ipv8 crypto not available")
 
 
 def _metadata(**overrides):

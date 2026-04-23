@@ -25,7 +25,7 @@ grpcio-tools>=1.62,<2
 protobuf>=6.31,<7
 
 # Safe serialization (replaces pickle for security)
-msgpack>=1.1.2
+msgpack>=1.1.2,<2
 
 
 

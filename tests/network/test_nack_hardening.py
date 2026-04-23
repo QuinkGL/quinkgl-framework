@@ -75,7 +75,7 @@ class TestNACKAuthorization:
         attacker = _make_peer("bb" * 20)
         payload = _nack_payload("t1", "attacker", [0])
 
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(
+        await GossipLearningCommunity._dispatch_request_chunks(
             community, attacker, payload
         )
 
@@ -92,7 +92,7 @@ class TestNACKAuthorization:
         peer = _make_peer(mid)
         payload = _nack_payload("t1", "node-a", [1])
 
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(
+        await GossipLearningCommunity._dispatch_request_chunks(
             community, peer, payload
         )
 
@@ -110,7 +110,7 @@ class TestResendBudget:
 
         for i in range(NACK_MAX_RESENDS_PER_TRANSFER):
             payload = _nack_payload("t2", "node-c", [0])
-            await GossipLearningCommunity.on_request_chunks.__wrapped__(
+            await GossipLearningCommunity._dispatch_request_chunks(
                 community, peer, payload
             )
 
@@ -120,7 +120,7 @@ class TestResendBudget:
         # Next NACK should be refused
         community.ez_send.reset_mock()
         payload = _nack_payload("t2", "node-c", [0])
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(
+        await GossipLearningCommunity._dispatch_request_chunks(
             community, peer, payload
         )
         community.ez_send.assert_not_called()
@@ -151,7 +151,7 @@ class TestTokenBucketRateLimit:
             assert community._nack_try_consume(mid) is True
 
         payload = _nack_payload("t-rate", "node-rate", [0])
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_request_chunks(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.nack_rate_limited", "ipv8_payload_dropped"]
@@ -172,7 +172,7 @@ class TestMalformedPayload:
             missing_indices_bytes=b"\x00\x00\x00",  # 3 bytes — invalid
         )
 
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(
+        await GossipLearningCommunity._dispatch_request_chunks(
             community, peer, payload
         )
 
@@ -192,7 +192,7 @@ class TestMalformedPayload:
             missing_indices_bytes=b"",
         )
 
-        await GossipLearningCommunity.on_request_chunks.__wrapped__(
+        await GossipLearningCommunity._dispatch_request_chunks(
             community, peer, payload
         )
 

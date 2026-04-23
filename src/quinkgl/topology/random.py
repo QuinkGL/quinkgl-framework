@@ -5,7 +5,7 @@ Simplest topology strategy: randomly select k peers from known peers.
 """
 import random
 import time
-from typing import List, Optional, Set, Dict, Any
+from typing import List, Optional, Set, Any
 from quinkgl.topology.base import TopologyStrategy, SelectionContext, PeerInfo
 
 class RandomTopology(TopologyStrategy):

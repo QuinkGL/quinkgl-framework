@@ -100,7 +100,7 @@ class TestModelUpdateReplay:
         peer = _make_peer("aa" * 20)
         payload = _model_update_payload("node-a", round_number=5)
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(c, peer, payload)
 
         mid = peer.mid.hex()
         assert c._last_seen_round[mid] == 5
@@ -113,7 +113,7 @@ class TestModelUpdateReplay:
         c._last_seen_round[mid] = 5
 
         payload = _model_update_payload("node-a", round_number=5)
-        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(c, peer, payload)
 
         # Should NOT have advanced (callback not invoked)
         assert c._last_seen_round[mid] == 5
@@ -127,7 +127,7 @@ class TestModelUpdateReplay:
         c._last_seen_round[mid] = 10
 
         payload = _model_update_payload("node-b", round_number=3)
-        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(c, peer, payload)
 
         assert c._last_seen_round[mid] == 10
 
@@ -138,7 +138,7 @@ class TestModelUpdateReplay:
         peer = _make_peer("ab" * 20)
 
         payload = _model_update_payload("node-future", round_number=MAX_ROUND_SKIP + 6)
-        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(c, peer, payload)
 
         assert c._last_seen_round == {}
         emitted = [call.args[0] for call in c.event_emitter.emit.call_args_list]
@@ -151,7 +151,7 @@ class TestModelUpdateReplay:
         c.on_model_update_callback = AsyncMock(side_effect=RuntimeError("boom"))
 
         payload = _model_update_payload("node-cb", round_number=7)
-        await GossipLearningCommunity.on_model_update.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(c, peer, payload)
 
         assert peer.mid.hex() not in c._last_seen_round
 
@@ -167,7 +167,7 @@ class TestChunkReplay:
         c._last_seen_round[mid] = 8
 
         payload = _chunk_payload("tid-1", "node-c", round_number=5)
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         # No buffer should have been created
         assert len(c._chunk_buffers) == 0
@@ -178,7 +178,7 @@ class TestChunkReplay:
         peer = _make_peer("dd" * 20)
 
         payload = _chunk_payload("tid-2", "node-d", round_number=10)
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         # Buffer should have been created
         assert len(c._chunk_buffers) == 1
@@ -190,7 +190,7 @@ class TestChunkReplay:
         peer = _make_peer("de" * 20)
 
         payload = _chunk_payload("tid-future", "node-future", round_number=MAX_ROUND_SKIP + 4)
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         assert len(c._chunk_buffers) == 0
         emitted = [call.args[0] for call in c.event_emitter.emit.call_args_list]
@@ -203,7 +203,7 @@ class TestChunkReplay:
         c.on_model_update_callback = AsyncMock(side_effect=RuntimeError("chunk boom"))
 
         payload = _chunk_payload("tid-cb", "node-cb", round_number=11, total_chunks=1)
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(c, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         assert peer.mid.hex() not in c._last_seen_round
 

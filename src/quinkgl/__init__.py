@@ -49,17 +49,19 @@ except _PackageNotFoundError:
 
 # =============================================================================
 # LOGGING — honour QUINKGL_LOG_LEVEL env-var (mirrors Flower's FLWR_LOG_LEVEL)
+# API-08: Make logging side-effect opt-in via QUINKGL_ENABLE_LOGGING env-var
 # =============================================================================
 import logging as _logging
 import os as _os
 
-_log_level_name = _os.environ.get("QUINKGL_LOG_LEVEL", "WARNING").upper()
-_log_level = getattr(_logging, _log_level_name, _logging.WARNING)
-_logging.getLogger("quinkgl").setLevel(_log_level)
+if _os.environ.get("QUINKGL_ENABLE_LOGGING", "").lower() in ("1", "true", "yes"):
+    _log_level_name = _os.environ.get("QUINKGL_LOG_LEVEL", "WARNING").upper()
+    _log_level = getattr(_logging, _log_level_name, _logging.WARNING)
+    _logging.getLogger("quinkgl").setLevel(_log_level)
 
-# Suppress noisy HTTP client loggers (telemetry uses httpx)
-_logging.getLogger("httpx").setLevel(_logging.WARNING)
-_logging.getLogger("httpcore").setLevel(_logging.WARNING)
+    # Suppress noisy HTTP client loggers (telemetry uses httpx)
+    _logging.getLogger("httpx").setLevel(_logging.WARNING)
+    _logging.getLogger("httpcore").setLevel(_logging.WARNING)
 
 # =============================================================================
 # CORE - Main node classes
@@ -185,6 +187,13 @@ from quinkgl.telemetry import TelemetryClient
 # NOTE: quinkgl.data module is not included in the package; remove these exports
 _data_available = False
 
+# =============================================================================
+# FEATURE FLAGS - Public availability flags
+# =============================================================================
+# API-09: Export public feature flags
+HAS_TENSORFLOW = _tensorflow_available
+HAS_DATA = _data_available
+
 
 # =============================================================================
 # PUBLIC API
@@ -262,6 +271,8 @@ __all__ = [
     # Feature flags
     "_tensorflow_available",
     "_data_available",
+    "HAS_TENSORFLOW",
+    "HAS_DATA",
 ]
 
 if _tensorflow_available:

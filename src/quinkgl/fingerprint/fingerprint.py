@@ -11,8 +11,17 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple, List
 
 
-_BUCKET_ORDER = {"low": 0, "medium": 1, "high": 2}
-FINGERPRINT_SCHEMA_VERSION = 2
+# T-10: Replaced ordered _BUCKET_ORDER with range-based adjacency.
+# The old ordinal mapping (low=0, medium=1, high=2) leaked relative
+# magnitude information.  The new approach uses the numeric bucket
+# boundaries from FingerprintPrivacyConfig.label_buckets to determine
+# adjacency, removing the implicit ordering assumption.
+_BUCKET_RANGES: Dict[str, Tuple[float, float]] = {
+    "low": (0.0, 0.2),
+    "medium": (0.2, 0.5),
+    "high": (0.5, 1.0),
+}
+FINGERPRINT_SCHEMA_VERSION = 3
 
 # Supported differential-privacy noise mechanisms for feature/gradient moments.
 NOISE_MECHANISM_GAUSSIAN = "gaussian"
@@ -25,8 +34,22 @@ _VALID_NOISE_MECHANISMS = {
 }
 
 
-def _adjacent_bucket(a: str, b: str) -> bool:
-    return abs(_BUCKET_ORDER.get(a, -1) - _BUCKET_ORDER.get(b, -1)) == 1
+def _adjacent_bucket(a: str, b: str, bucket_ranges: Optional[Dict[str, Tuple[float, float]]] = None) -> bool:
+    """T-10: Range-based adjacency instead of ordinal adjacency.
+
+    Two buckets are adjacent if their numeric ranges overlap or touch,
+    but are not the same bucket.  This replaces the old ordinal system
+    (low=0, medium=1, high=2) which leaked magnitude ordering information.
+    """
+    if a == b:
+        return False
+    ranges = bucket_ranges or _BUCKET_RANGES
+    ra = ranges.get(a)
+    rb = ranges.get(b)
+    if ra is None or rb is None:
+        return False
+    # Adjacent if ranges touch or overlap (one starts before the other ends)
+    return not (ra[1] < rb[0] or rb[1] < ra[0])
 
 
 def calibrated_noise_scale(
@@ -160,13 +183,38 @@ class FingerprintPrivacyConfig:
         if self.feature_noise_mechanism not in _VALID_NOISE_MECHANISMS:
             raise ValueError(
                 f"feature_noise_mechanism must be one of {_VALID_NOISE_MECHANISMS}, "
-                f"got '{self.feature_noise_mechanism}'"
+                f"got {self.feature_noise_mechanism}"
             )
-        if self.gradient_noise_mechanism not in _VALID_NOISE_MECHANISMS:
+        if self.gradient_enabled and self.gradient_noise_mechanism not in _VALID_NOISE_MECHANISMS:
             raise ValueError(
                 f"gradient_noise_mechanism must be one of {_VALID_NOISE_MECHANISMS}, "
-                f"got '{self.gradient_noise_mechanism}'"
+                f"got {self.gradient_noise_mechanism}"
             )
+        # T-14: Call validate method
+        self.validate()
+
+    def validate(self) -> None:
+        """T-14: Validate privacy configuration parameters."""
+        if self.feature_noise_sigma < 0:
+            raise ValueError("feature_noise_sigma must be non-negative")
+        if self.gradient_noise_sigma < 0:
+            raise ValueError("gradient_noise_sigma must be non-negative")
+        if self.feature_dp_epsilon is not None and self.feature_dp_epsilon <= 0:
+            raise ValueError("feature_dp_epsilon must be positive when set")
+        if self.gradient_dp_epsilon is not None and self.gradient_dp_epsilon <= 0:
+            raise ValueError("gradient_dp_epsilon must be positive when set")
+        if self.feature_dp_delta <= 0 or self.feature_dp_delta >= 1:
+            raise ValueError("feature_dp_delta must be in (0, 1)")
+        if self.gradient_dp_delta <= 0 or self.gradient_dp_delta >= 1:
+            raise ValueError("gradient_dp_delta must be in (0, 1)")
+        # Use feature_sensitivity if set, otherwise use feature_clip_norm
+        sens = self.feature_sensitivity if self.feature_sensitivity is not None else self.feature_clip_norm
+        if sens <= 0:
+            raise ValueError("feature_sensitivity/feature_clip_norm must be positive")
+        if self.gradient_enabled:
+            grad_sens = self.gradient_sensitivity if self.gradient_sensitivity is not None else self.feature_clip_norm
+            if grad_sens <= 0:
+                raise ValueError("gradient_sensitivity must be positive when gradient_enabled is True")
 
     def effective_feature_noise_scale(self) -> float:
         """Return the noise scale actually applied to feature moments.
@@ -272,8 +320,12 @@ class DataFingerprint:
             + weights.history * weights.external_history_score
         )
 
-        normalized = raw / active_w * total_w if active_w > 0 else 0.0
-        return max(0.0, min(1.0, normalized / total_w))
+        # T-15: Simplified normalisation — dividing by active_w directly
+        # yields the weighted average over the active signals, which is
+        # already in [0, 1] when each similarity component is in [0, 1].
+        # The previous formula `raw / active_w * total_w / total_w` was
+        # algebraically equivalent but unnecessarily complex.
+        return max(0.0, min(1.0, raw / active_w if active_w > 0 else 0.0))
 
     def _label_similarity(self, other: "DataFingerprint") -> float:
         all_labels = set(self.label_buckets.keys()) | set(other.label_buckets.keys())
@@ -370,9 +422,9 @@ class DataFingerprint:
         for key, bucket in label_buckets.items():
             if not isinstance(key, str):
                 raise ValueError("DataFingerprint.label_buckets keys must be strings")
-            if bucket not in _BUCKET_ORDER:
+            if bucket not in _BUCKET_RANGES:
                 raise ValueError(
-                    f"DataFingerprint.label_buckets values must be one of {sorted(_BUCKET_ORDER)}, got '{bucket}'"
+                    f"DataFingerprint.label_buckets values must be one of {sorted(_BUCKET_RANGES)}, got '{bucket}'"
                 )
         moments = {k: (v[0], v[1]) for k, v in data.get("noised_moments", {}).items()}
         for key, value in moments_data.items():

@@ -31,13 +31,12 @@ dependencies = [
     "scikit-learn>=1.4,<2",
     "pandas>=2.0,<3",
     # P2P networking
-    "pyipv8>=3.0,<4",
+    "pyipv8>=3.1,<4",
     # gRPC for communication
     "grpcio>=1.62,<2",
-    "grpcio-tools>=1.62,<2",
     "protobuf>=6.31,<7",
     # Safe serialization
-    "msgpack>=1.1.2",
+    "msgpack>=1.1.2,<2",
     # Telemetry service
     "fastapi>=0.110,<1",
     "pydantic>=2.0,<3",
@@ -58,6 +57,7 @@ dev = [
     "black>=24,<27",
     "flake8>=7,<8",
     "mypy>=1.8,<2",
+    "grpcio-tools>=1.62,<2",
 ]
 docs = [
     "sphinx >=7.0",

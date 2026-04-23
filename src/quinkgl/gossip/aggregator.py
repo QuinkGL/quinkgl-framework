@@ -120,6 +120,7 @@ class ModelAggregator:
                 logger.warning("Failed to restore latest checkpoint round", exc_info=True)
         self.known_peers: Dict[str, PeerInfo] = {}
         self.pending_updates: List[ModelUpdate] = []
+        self._MAX_PENDING_UPDATES = 1000  # Bound to prevent memory exhaustion
         self._pending_lock = asyncio.Lock()
         self._model_lock = asyncio.Lock()
         self._aggregating = False
@@ -201,9 +202,29 @@ class ModelAggregator:
                 self.model.set_weights(all_weights)
 
     async def _evaluate_model(self, data: Any) -> Dict[str, float]:
+        """Evaluate model in a thread executor.
+
+        T18: Cancellation-safety — ``run_in_executor`` cannot be interrupted
+        once the thread has started.  If the outer task is cancelled while
+        awaiting the executor result, the ``_model_lock`` would remain held
+        unless we shield the await.  We catch ``CancelledError`` explicitly
+        so the lock is always released, then re-raise so the caller's
+        ``CancelledError`` handler (in ``run_continuous``) sees it.
+        """
         loop = asyncio.get_running_loop()
         async with self._model_lock:
-            return await loop.run_in_executor(None, lambda: self.model.evaluate(data))
+            try:
+                return await asyncio.shield(
+                    loop.run_in_executor(None, lambda: self.model.evaluate(data))
+                )
+            except asyncio.CancelledError:
+                # The executor thread may still be running, but we must
+                # release the lock.  The result (if any) is discarded.
+                logger.debug(
+                    "_evaluate_model cancelled while executor was running; "
+                    "discarding result"
+                )
+                raise
 
     def _spawn_task(self, coro) -> Optional[asyncio.Task]:
         """Create a tracked background task that auto-removes on completion."""
@@ -216,12 +237,33 @@ class ModelAggregator:
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    # T-OBS-17: Identifier keys that should be truncated in emitted events
+    _PII_KEYS = frozenset({"node_id", "peer_id", "sender_id", "peer_mid"})
+
+    def _scrub_pii(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """T-OBS-17: Truncate identifier values in event payloads to limit PII exposure."""
+        scrubbed = {}
+        for key, value in payload.items():
+            if key in self._PII_KEYS and isinstance(value, str) and len(value) > 16:
+                scrubbed[key] = value[:16] + "..."
+            elif key in self._PII_KEYS and isinstance(value, (list, tuple)):
+                scrubbed[key] = [
+                    (v[:16] + "...") if isinstance(v, str) and len(v) > 16 else v
+                    for v in value
+                ]
+            else:
+                scrubbed[key] = value
+        return scrubbed
+
     def _emit_event(self, event_type: str, payload: Dict[str, Any]) -> None:
         """Schedule runtime observability delivery off the hot path.
 
         Caps pending event tasks at ``_MAX_PENDING_EVENTS`` to prevent
         unbounded growth when subscribers are slow (A3 §2.4).
+
+        T-OBS-17: All payloads are PII-scrubbed before emission.
         """
+        payload = self._scrub_pii(payload)
         if self.event_emitter:
             try:
                 loop = asyncio.get_running_loop()
@@ -385,7 +427,10 @@ class ModelAggregator:
             )
             
             # Notify topology strategy
-            await self.topology.on_peer_disconnected(peer_id)
+            try:
+                await self.topology.on_peer_disconnected(peer_id)
+            except Exception as e:
+                logger.error(f"Error in topology.on_peer_disconnected for {peer_id}: {e}")
             logger.debug(f"Removed peer: {peer_id}")
 
     async def handle_incoming_message(self, message: GossipMessage):
@@ -400,14 +445,26 @@ class ModelAggregator:
             return
 
         if message.msg_type == MessageType.MODEL_UPDATE:
-            await self._handle_model_update(message)
+            try:
+                await self._handle_model_update(message)
+            except Exception as e:
+                logger.error(f"Error handling model update from {message.sender_id}: {e}")
         elif message.msg_type == MessageType.HEARTBEAT:
-            if message.sender_id in self.known_peers:
-                self.known_peers[message.sender_id].last_seen = datetime.now()
+            try:
+                if message.sender_id in self.known_peers:
+                    self.known_peers[message.sender_id].last_seen = datetime.now()
+            except Exception as e:
+                logger.error(f"Error handling heartbeat from {message.sender_id}: {e}")
         elif message.msg_type == MessageType.DISCOVERY_ANNOUNCE:
-            await self._handle_discovery_announce(message)
+            try:
+                await self._handle_discovery_announce(message)
+            except Exception as e:
+                logger.error(f"Error handling discovery announce from {message.sender_id}: {e}")
         elif message.msg_type == MessageType.CHECKPOINT_ANNOUNCE:
-            await self._handle_checkpoint_announce(message)
+            try:
+                await self._handle_checkpoint_announce(message)
+            except Exception as e:
+                logger.error(f"Error handling checkpoint announce from {message.sender_id}: {e}")
 
     async def _handle_model_update(self, message: ModelUpdateMessage):
         """Handle an incoming model update.
@@ -478,6 +535,23 @@ class ModelAggregator:
 
         dropped_due_to_backpressure = False
         async with self._pending_lock:
+            # Check for duplicate peer_id in pending_updates
+            for existing_update in self.pending_updates:
+                if existing_update.peer_id == message.sender_id:
+                    logger.debug(
+                        f"Rejecting duplicate update from {message.sender_id}: "
+                        f"already have update for this peer in pending_updates"
+                    )
+                    self._emit_event(
+                        "model_rejected_duplicate",
+                        {
+                            "node_id": self.peer_id,
+                            "peer_id": message.sender_id,
+                            "round": message.round_number,
+                        },
+                    )
+                    return
+            
             if len(self.pending_updates) >= self.max_pending_updates:
                 dropped_due_to_backpressure = True
             else:
@@ -530,6 +604,16 @@ class ModelAggregator:
 
     async def _handle_checkpoint_announce(self, message):
         """Handle a checkpoint announcement from a peer."""
+        # Validate: only accept checkpoints from known peers
+        if message.sender_id not in self.known_peers:
+            logger.debug(f"Rejecting checkpoint from unknown peer {message.sender_id}")
+            return
+        
+        # Validate: only accept checkpoints when loop is running
+        if not self.running:
+            logger.debug(f"Rejecting checkpoint from {message.sender_id}: loop not running")
+            return
+        
         checkpoint = PeerCheckpoint(
             peer_id=message.sender_id,
             round_number=message.round_number,
@@ -537,7 +621,7 @@ class ModelAggregator:
             accuracy=message.accuracy,
             model_version=message.model_version,
         )
-        self.consensus_tracker.record_checkpoint(checkpoint)
+        await self.consensus_tracker.record_checkpoint(checkpoint)
 
         result = self.consensus_tracker.check_consensus()
         if result and result.reached:
@@ -561,16 +645,19 @@ class ModelAggregator:
 
     async def _broadcast_checkpoint(self, loss: float = 0.0, accuracy: float = 0.0) -> None:
         """Broadcast checkpoint announcement to all known peers."""
-        self.consensus_tracker.record_checkpoint(
-            PeerCheckpoint(
-                peer_id=self.peer_id,
-                round_number=self.current_round,
-                loss=loss,
-                accuracy=accuracy,
-                model_version=self.model_version,
+        try:
+            await self.consensus_tracker.record_checkpoint(
+                PeerCheckpoint(
+                    peer_id=self.peer_id,
+                    round_number=self.current_round,
+                    loss=loss,
+                    accuracy=accuracy,
+                    model_version=self.model_version,
+                )
             )
-        )
-        self.consensus_tracker.record_local_checkpoint(self.current_round)
+            await self.consensus_tracker.record_local_checkpoint(self.current_round)
+        except Exception as e:
+            logger.debug(f"Failed to record checkpoint: {e}")
 
         if self.broadcast_callback:
             checkpoint_msg = CheckpointAnnounceMessage.create(
@@ -613,8 +700,22 @@ class ModelAggregator:
                 if filtered_overrides:
                     training_config = replace(self.training_config, **filtered_overrides)
 
+        # T19: Cancellation-safety of ModelWrapper.train — shield the await
+        # so that if the outer task is cancelled, the _model_lock is always
+        # released.  model.train() itself is synchronous CPU/GPU work wrapped
+        # in an async method, so it cannot be interrupted mid-computation; but
+        # the lock must not be left held after cancellation.
         async with self._model_lock:
-            result = await self.model.train(data, training_config)
+            try:
+                result = await asyncio.shield(
+                    self.model.train(data, training_config)
+                )
+            except asyncio.CancelledError:
+                logger.debug(
+                    "_train_local cancelled while model.train() was running; "
+                    "discarding result"
+                )
+                raise
 
         # Store result for sample_count in aggregation
         self._last_training_result = result
@@ -916,6 +1017,11 @@ class ModelAggregator:
                 checkpoint broadcast instead of the pre-aggregation training metrics
                 (Task 6a).  Pass a small validation split to keep evaluation cheap.
         """
+        # Guard against re-entry
+        if self.running:
+            logger.warning("run_continuous called while already running - ignoring")
+            return
+        
         self.running = True
         logger.info("Starting continuous gossip learning loop")
 
@@ -934,6 +1040,10 @@ class ModelAggregator:
         try:
             while self.running:
                 round_start_time = datetime.now()
+                self._emit_event("round_started", {
+                    "node_id": self.peer_id,
+                    "round": self.current_round,
+                })
 
                 try:
                     # Task 5a: reset _last_training_result at the top of each round
@@ -941,11 +1051,7 @@ class ModelAggregator:
                     # for own_sample_count when this round's training fails.
                     self._last_training_result = None
 
-                    # Task 4a: increment AFTER all work succeeds so the counter
-                    # reflects completed rounds, not attempted ones.
-                    # NOTE: all in-round references to self.current_round use the
-                    # previous round's number; peers' round-gating tolerance handles
-                    # the 1-round offset (stale_round_tolerance ≥ 1).
+                    # Increment round number at the start to reflect the new round
                     self.current_round += 1
                     self._refresh_local_fingerprint()
 
@@ -1054,7 +1160,10 @@ class ModelAggregator:
                     await self.topology.periodic_maintenance(context)
 
                     # 5. Wait for incoming models & aggregation trigger
-                    # We wait for the gossip interval, but allow interruption for earlier aggregation
+                    # Wait for the gossip interval, but allow interruption for earlier aggregation.
+                    # NOTE: This can cause a "hot-spin" if the aggregation event is set immediately
+                    # after being cleared (e.g., when new updates arrive right after aggregation).
+                    # This is intentional to avoid latency, but may cause high CPU in some scenarios.
                     try:
                         await asyncio.wait_for(self._aggregation_event.wait(), timeout=self.gossip_interval)
                     except asyncio.TimeoutError:
@@ -1119,9 +1228,14 @@ class ModelAggregator:
                                 f"Consensus reached at round {result.checkpoint_round}: "
                                 f"{result.agreeing_peers}/{result.total_peers} peers agree"
                             )
-                        self.consensus_tracker.prune_old_checkpoints()
+                        await self.consensus_tracker.prune_old_checkpoints()
 
                     # Reset error counter on successful round
+                    self._emit_event("round_completed", {
+                        "node_id": self.peer_id,
+                        "round": self.current_round,
+                        "duration": round_duration,
+                    })
                     consecutive_errors = 0
 
                     round_duration = (datetime.now() - round_start_time).total_seconds()
@@ -1183,10 +1297,38 @@ class ModelAggregator:
         self._background_tasks.clear()
 
     async def stop(self):
-        """Stop the gossip learning loop and await background task cleanup."""
+        """Stop the gossip learning loop."""
         self.running = False
-        logger.info("Stopping continuous gossip learning loop")
-        await self._cancel_background_tasks()
+        logger.info("Aggregator stopped")
+
+    def state_dict(self) -> Dict[str, Any]:
+        """
+        Serialize aggregator state for persistence across restarts.
+        
+        Returns:
+            Dict containing current_round and other persistent state.
+        """
+        return {
+            "current_round": self.current_round,
+            "peer_id": self.peer_id,
+            "domain": self.domain,
+            "model_version": self.model_version,
+            "data_schema_hash": self.data_schema_hash,
+            "convergence_monitor": self.convergence_monitor.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Restore aggregator state from a saved state dict.
+        
+        Args:
+            state_dict: Dict containing saved state from state_dict().
+        """
+        self.current_round = state_dict.get("current_round", 0)
+        conv_state = state_dict.get("convergence_monitor")
+        if conv_state is not None:
+            self.convergence_monitor.load_state_dict(conv_state)
+        logger.info(f"Restored aggregator state: current_round={self.current_round}")
 
 
 # Backward compatibility alias (deprecated - use ModelAggregator instead)

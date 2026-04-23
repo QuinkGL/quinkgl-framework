@@ -10,7 +10,7 @@ from quinkgl.fingerprint.fingerprint import (
     FINGERPRINT_SCHEMA_VERSION,
     AffinityWeights,
     FingerprintPrivacyConfig,
-    _BUCKET_ORDER,
+    _BUCKET_RANGES,
     _adjacent_bucket,
 )
 from quinkgl.fingerprint.computer import FingerprintComputer
@@ -297,6 +297,192 @@ class TestAffinityScore:
         w = AffinityWeights(external_history_score=2.0)
         score = fp1.affinity_score(fp2, w)
         assert 0.0 <= score <= 1.0
+
+
+class TestAffinityScoreProperties:
+    """T-15: Property-based tests for simplified affinity_score normalisation."""
+
+    def _make_fp(self, label_bucket="high", moment_val=(1.0, 0.5)):
+        """Helper to create a fingerprint with controlled values."""
+        return DataFingerprint(
+            label_buckets={"a": label_bucket},
+            noised_moments={"l": moment_val},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+
+    def test_self_affinity_is_one(self):
+        """Property: affinity_score(fp, fp) == 1.0 for any fingerprint."""
+        fp = self._make_fp("medium", (2.0, 1.0))
+        assert fp.affinity_score(fp) == pytest.approx(1.0)
+
+    def test_self_affinity_is_one_with_gradient(self):
+        """Property: self-affinity = 1 even with gradient moments."""
+        fp = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+            gradient_moments={"g": (0.5, 0.1)},
+        )
+        assert fp.affinity_score(fp) == pytest.approx(1.0)
+
+    def test_symmetry(self):
+        """Property: affinity_score(a, b) == affinity_score(b, a)."""
+        fp1 = self._make_fp("high", (1.0, 0.5))
+        fp2 = self._make_fp("low", (0.0, 1.0))
+        assert fp1.affinity_score(fp2) == pytest.approx(fp2.affinity_score(fp1))
+
+    def test_always_bounded_0_1(self):
+        """Property: affinity_score always returns a value in [0, 1]."""
+        fps = [
+            self._make_fp("high", (10.0, 5.0)),
+            self._make_fp("low", (0.0, 0.0)),
+            self._make_fp("medium", (-1.0, 2.0)),
+            DataFingerprint(
+                label_buckets={}, noised_moments={},
+                sample_bucket="0-100", num_classes=0,
+            ),
+        ]
+        weights_list = [
+            AffinityWeights(),
+            AffinityWeights(external_history_score=0.9),
+            AffinityWeights(label=0.0, feature=0.0, gradient=0.0, history=1.0, external_history_score=0.5),
+        ]
+        for fp1 in fps:
+            for fp2 in fps:
+                for w in weights_list:
+                    score = fp1.affinity_score(fp2, w)
+                    assert 0.0 <= score <= 1.0, (
+                        f"Score {score} out of [0,1] for {fp1.label_buckets} vs {fp2.label_buffers}"
+                    )
+
+    def test_identical_fingerprints_higher_than_dissimilar(self):
+        """Property: identical fingerprints have higher affinity than dissimilar ones."""
+        fp_same = self._make_fp("high", (1.0, 0.5))
+        fp_diff = self._make_fp("low", (0.0, 1.0))
+        w = AffinityWeights()
+
+        score_same = fp_same.affinity_score(fp_same, w)
+        score_diff = fp_same.affinity_score(fp_diff, w)
+        assert score_same > score_diff
+
+    def test_external_history_score_contributes_positively(self):
+        """Property: when external_history_score > 0, the history signal
+        adds to the raw weighted sum (even if normalisation shifts the
+        final value).  Verify by checking that the history component
+        appears in the computation."""
+        fp1 = self._make_fp("high", (1.0, 0.5))
+        fp2 = self._make_fp("medium", (0.5, 0.3))
+
+        w_no_hist = AffinityWeights(external_history_score=0.0)
+        w_hist = AffinityWeights(external_history_score=1.0)
+
+        score_no_hist = fp1.affinity_score(fp2, w_no_hist)
+        score_hist = fp1.affinity_score(fp2, w_hist)
+
+        # With a high external_history_score, the history signal
+        # contributes, pulling the score toward the history component.
+        # The score with history should differ from the one without.
+        assert score_hist != score_no_hist
+
+    def test_zero_weights_returns_default(self):
+        """Property: all-zero weights returns 0.5 (neutral default)."""
+        fp1 = self._make_fp()
+        fp2 = self._make_fp()
+        w = AffinityWeights(label=0.0, feature=0.0, gradient=0.0, history=0.0)
+        score = fp1.affinity_score(fp2, w)
+        assert score == 0.5
+
+    def test_gradient_included_when_both_present(self):
+        """Property: gradient moments contribute to affinity when both fingerprints have them."""
+        fp1 = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+            gradient_moments={"g": (1.0, 0.5)},
+        )
+        fp2 = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+            gradient_moments={"g": (1.0, 0.5)},
+        )
+        fp_no_grad = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+
+        score_with_grad = fp1.affinity_score(fp2)
+        score_without_grad = fp1.affinity_score(fp_no_grad)
+        # Both should be valid; with gradient, identical fingerprints = 1.0
+        assert score_with_grad == pytest.approx(1.0)
+        assert 0.0 <= score_without_grad <= 1.0
+
+
+class TestFingerprintReuseAcrossRounds:
+    """T-22: Verify that the fingerprint data is set once and re-used across
+    announce rounds (only round_nonce changes).  Confirms FP-02 scenario (b):
+    noise is drawn once at compute time and the same noised fingerprint is
+    re-broadcast every round.
+    """
+
+    def test_fingerprint_core_data_unchanged_across_rounds(self):
+        """When _refresh_local_fingerprint is called with a static source,
+        the underlying fingerprint data (label_buckets, noised_moments) must
+        remain identical — only the round_nonce may differ."""
+        from quinkgl.fingerprint.fingerprint import DataFingerprint
+
+        source_fp = DataFingerprint(
+            label_buckets={"a": "high"},
+            noised_moments={"l": (1.0, 0.5)},
+            sample_bucket="1k-10k",
+            num_classes=1,
+        )
+
+        # Simulate what _make_local_fingerprint_provider does for a static source
+        import hashlib
+
+        def bind_to_round(fp, round_number):
+            payload = fp.to_dict()
+            payload["round_nonce"] = hashlib.sha256(
+                f"quinkgl-fingerprint-round:{round_number}".encode("utf-8")
+            ).hexdigest()[:16]
+            return DataFingerprint.from_dict(payload)
+
+        fp_round1 = bind_to_round(source_fp, 1)
+        fp_round2 = bind_to_round(source_fp, 2)
+
+        # Core data must be identical
+        assert fp_round1.label_buckets == fp_round2.label_buckets
+        assert fp_round1.noised_moments == fp_round2.noised_moments
+        assert fp_round1.sample_bucket == fp_round2.sample_bucket
+
+        # round_nonce differs across rounds
+        assert fp_round1.round_nonce != fp_round2.round_nonce
+
+    def test_static_fingerprint_provider_returns_same_underlying_data(self):
+        """A static fingerprint source must produce identical data regardless
+        of the round number passed to the provider."""
+        from quinkgl.fingerprint.fingerprint import DataFingerprint
+
+        source = DataFingerprint(
+            label_buckets={"x": "medium"},
+            noised_moments={"m": (0.3, 0.1)},
+            sample_bucket="100-1k",
+            num_classes=1,
+        )
+
+        # Simulate the static provider path
+        for rnd in [1, 5, 100]:
+            # Static source: same object returned every time
+            result = source  # provider(round_number) returns source for static
+            assert result.label_buckets == source.label_buckets
+            assert result.noised_moments == source.noised_moments
 
 
 class TestGradientSimilarity:

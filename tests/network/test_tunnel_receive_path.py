@@ -18,6 +18,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
+
+# T10: Skip test if ipv8 is not installed
+pytest.importorskip("ipv8")
 from ipv8.keyvault.crypto import default_eccrypto
 
 from quinkgl.network.model_serializer import serialize_model

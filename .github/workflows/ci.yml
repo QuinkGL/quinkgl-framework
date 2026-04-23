@@ -8,11 +8,12 @@ on:
 jobs:
   smoke:
     name: Install, Import, Smoke Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +34,9 @@ jobs:
 
       - name: Run smoke tests
         run: pytest tests/test_package_metadata.py tests/aggregation/test_public_imports.py --tb=short -q
+
+      - name: Run full test suite
+        run: pytest --tb=short -q
 
       - name: Build distribution
         run: python -m build

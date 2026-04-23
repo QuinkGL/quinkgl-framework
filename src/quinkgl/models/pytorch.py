@@ -71,7 +71,7 @@ class PyTorchModel(ModelWrapper):
         import torch
         import logging
 
-        logger = logging.getLogger(__name__)
+        logging.getLogger(__name__)
 
         # Get expected shapes from current model
         expected_state_dict = self.model.state_dict()
@@ -81,8 +81,7 @@ class PyTorchModel(ModelWrapper):
         for name, array in weights.items():
             # Check if parameter exists in model
             if name not in expected_state_dict:
-                logger.warning(f"Unknown parameter '{name}', skipping")
-                continue
+                raise ValueError(f"Unknown parameter '{name}' not found in model state dict")
 
             # Convert to numpy if not already
             if not isinstance(array, np.ndarray):
@@ -336,7 +335,6 @@ class PyTorchModel(ModelWrapper):
         all parameter shapes and names for better compatibility checking.
         """
         import hashlib
-        import torch
 
         # Collect all parameter information for full architecture fingerprint
         param_info = []

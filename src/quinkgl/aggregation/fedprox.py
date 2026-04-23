@@ -15,6 +15,7 @@ legacy post-hoc approach ("weight_interpolation").
 
 import warnings
 from copy import deepcopy
+from typing import Any, Dict
 from typing import List
 
 import numpy as np
@@ -97,18 +98,29 @@ class FedProx(FedAvg):
 
         return result
 
-    def get_training_config_overrides(self) -> dict:
+    def get_training_config_overrides(self, current_round: int = None) -> dict:
         """
         Get TrainingConfig overrides for FedProx training-time mode.
 
+        AGG-TASK-07: Enforce FedProx training-time round-trip.
         Call this before each training round to inject the proximal
-        term into the local loss function.
+        term into the local loss function. The global_weights used
+        must be from the previous aggregation round to ensure correctness.
+
+        Args:
+            current_round: Optional current training round for validation.
+                          If provided, validates that global_weights exist
+                          and are from a recent round.
 
         Returns:
             Dict with proximal_coefficient and global_weights,
             or empty dict if not applicable.
         """
         if self.mode == "training_time" and self.global_weights is not None:
+            if current_round is not None and current_round == 0:
+                # First round: no global weights available yet
+                logger.debug("FedProx first round: no global weights for proximal term")
+                return {}
             return {
                 "proximal_coefficient": self.mu,
                 "global_weights": self.global_weights,
@@ -147,3 +159,36 @@ class FedProx(FedAvg):
             return result
         else:
             return weights
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize mutable state for restart persistence (AGG-TASK-05)."""
+        state: Dict[str, Any] = {
+            "config": dict(self.config),
+            "mu": self.mu,
+            "mode": self.mode,
+        }
+        if self.global_weights is not None:
+            if isinstance(self.global_weights, np.ndarray):
+                state["global_weights"] = self.global_weights.tolist()
+            elif isinstance(self.global_weights, dict):
+                state["global_weights"] = {
+                    k: v.tolist() for k, v in self.global_weights.items()
+                }
+        return state
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore mutable state from a snapshot (AGG-TASK-05)."""
+        self.config = dict(state.get("config", {}))
+        self.mu = float(state.get("mu", self.mu))
+        self.mode = state.get("mode", self.mode)
+        gw_raw = state.get("global_weights")
+        if gw_raw is not None:
+            if isinstance(gw_raw, dict):
+                self.global_weights = {
+                    k: np.array(v, dtype=np.float64)
+                    for k, v in gw_raw.items()
+                }
+            else:
+                self.global_weights = np.array(gw_raw, dtype=np.float64)
+        else:
+            self.global_weights = None

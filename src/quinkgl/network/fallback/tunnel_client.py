@@ -25,13 +25,26 @@ RECONNECT_MAX_ATTEMPTS = 10
 class TunnelClient:
     """Client for reverse tunnel NAT traversal."""
     
-    def __init__(self, tunnel_server: str, node_id: str):
+    def __init__(
+        self,
+        tunnel_server: str,
+        node_id: str,
+        # NET-016/017: TLS/mTLS configuration
+        root_certificates_path: Optional[str] = None,
+        private_key_path: Optional[str] = None,
+        certificate_chain_path: Optional[str] = None,
+        register_deadline_seconds: float = 30.0,
+    ):
         """
         Initialize tunnel client.
         
         Args:
             tunnel_server: "host:port" of tunnel server
             node_id: Unique identifier for this node
+            root_certificates_path: Path to CA cert PEM (for TLS/mTLS)
+            private_key_path: Path to client key PEM (for mTLS)
+            certificate_chain_path: Path to client cert PEM (for mTLS)
+            register_deadline_seconds: NET-017 per-call deadline for RegisterTunnel
         """
         self.tunnel_server = tunnel_server
         self.node_id = node_id
@@ -47,25 +60,67 @@ class TunnelClient:
         # B10: Reconnect state
         self._reconnect_enabled = True
         self._reconnect_task: Optional[asyncio.Task] = None
+        # NET-016/017: TLS config
+        self._root_certificates_path = root_certificates_path
+        self._private_key_path = private_key_path
+        self._certificate_chain_path = certificate_chain_path
+        self._register_deadline_seconds = register_deadline_seconds
         
         # Signaling callbacks
         self.on_sdp_offer: Optional[Callable] = None
         self.on_sdp_answer: Optional[Callable] = None
         self.on_ice_candidate: Optional[Callable] = None
     
+    def _build_channel_credentials(self) -> Optional[grpc.ChannelCredentials]:
+        """NET-016/017: Build gRPC channel credentials for TLS/mTLS."""
+        if self._root_certificates_path is None:
+            return None  # insecure channel
+
+        with open(self._root_certificates_path, 'rb') as f:
+            root_certificates = f.read()
+
+        if self._private_key_path and self._certificate_chain_path:
+            # mTLS: client presents certificate
+            with open(self._private_key_path, 'rb') as f:
+                private_key = f.read()
+            with open(self._certificate_chain_path, 'rb') as f:
+                certificate_chain = f.read()
+            return grpc.ssl_channel_credentials(
+                root_certificates=root_certificates,
+                private_key=private_key,
+                certificate_chain=certificate_chain,
+            )
+        else:
+            # TLS only (server-authenticated)
+            return grpc.ssl_channel_credentials(
+                root_certificates=root_certificates,
+            )
+
     async def connect(self):
         """Connect to tunnel server."""
         logger.info(f"Connecting to tunnel server {self.tunnel_server}...")
-        
-        self.channel = grpc.aio.insecure_channel(
-            self.tunnel_server,
-            options=[
-                ('grpc.max_send_message_length', 50 * 1024 * 1024),
-                ('grpc.max_receive_message_length', 50 * 1024 * 1024),
-                ('grpc.keepalive_time_ms', 60000),
-                ('grpc.keepalive_timeout_ms', 20000),
-            ]
-        )
+
+        channel_options = [
+            ('grpc.max_send_message_length', 50 * 1024 * 1024),
+            ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+            ('grpc.keepalive_time_ms', 60000),
+            ('grpc.keepalive_timeout_ms', 20000),
+        ]
+
+        # NET-016/017: Use secure channel when TLS credentials are configured
+        credentials = self._build_channel_credentials()
+        if credentials is not None:
+            self.channel = grpc.aio.secure_channel(
+                self.tunnel_server,
+                credentials,
+                options=channel_options,
+            )
+            logger.info("Using TLS/mTLS secure channel")
+        else:
+            self.channel = grpc.aio.insecure_channel(
+                self.tunnel_server,
+                options=channel_options,
+            )
         
         self.stub = tunnel_pb2_grpc.TunnelServiceStub(self.channel)
         self.running = True
@@ -86,7 +141,11 @@ class TunnelClient:
                     msg = await self.message_queue.get()
                     yield msg
             
-            async for msg in self.stub.RegisterTunnel(request_generator()):
+            # NET-017: Per-call deadline on RegisterTunnel
+            async for msg in self.stub.RegisterTunnel(
+                request_generator(),
+                timeout=self._register_deadline_seconds,
+            ):
                 await self._handle_tunnel_message(msg)
         
         except Exception as e:
@@ -115,8 +174,13 @@ class TunnelClient:
             payload=register_payload.SerializeToString(),
             timestamp=int(time.time() * 1000)
         )
-        
-        await self.message_queue.put(msg)
+
+        # NET-032: Add deadline to prevent indefinite blocking
+        try:
+            await asyncio.wait_for(self.message_queue.put(msg), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Tunnel client message queue put timed out (REGISTER)")
+            raise
     
     async def _handle_tunnel_message(self, msg: tunnel_pb2.TunnelMessage):
         """Handle incoming tunnel message."""
@@ -149,15 +213,20 @@ class TunnelClient:
                 node_id=self.node_id,
                 timestamp=int(time.time() * 1000)
             )
-            
+
             response = tunnel_pb2.TunnelMessage(
                 node_id=self.node_id,
                 type=tunnel_pb2.HEARTBEAT,
                 payload=heartbeat.SerializeToString(),
                 timestamp=int(time.time() * 1000)
             )
-            
-            await self.message_queue.put(response)
+
+            # NET-032: Add deadline to prevent indefinite blocking
+            try:
+                await asyncio.wait_for(self.message_queue.put(response), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Tunnel client message queue put timed out (HEARTBEAT)")
+                raise
         elif msg.type == tunnel_pb2.ERROR:
             try:
                 error = tunnel_pb2.ErrorPayload()
@@ -213,8 +282,13 @@ class TunnelClient:
             payload=chat_msg.SerializeToString(),
             timestamp=int(time.time() * 1000)
         )
-        
-        await self.message_queue.put(msg)
+
+        # NET-032: Add deadline to prevent indefinite blocking
+        try:
+            await asyncio.wait_for(self.message_queue.put(msg), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Tunnel client message queue put timed out (TEXT_MESSAGE)")
+            raise
     
     async def send_sdp_offer(self, target_id: str, offer_payload: bytes):
         """Send SDP offer to peer."""
@@ -225,7 +299,12 @@ class TunnelClient:
             payload=offer_payload,
             timestamp=int(time.time() * 1000)
         )
-        await self.message_queue.put(msg)
+        # NET-032: Add deadline to prevent indefinite blocking
+        try:
+            await asyncio.wait_for(self.message_queue.put(msg), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Tunnel client message queue put timed out (SDP_OFFER)")
+            raise
 
     async def send_sdp_answer(self, target_id: str, answer_payload: bytes):
         """Send SDP answer to peer."""
@@ -236,7 +315,12 @@ class TunnelClient:
             payload=answer_payload,
             timestamp=int(time.time() * 1000)
         )
-        await self.message_queue.put(msg)
+        # NET-032: Add deadline to prevent indefinite blocking
+        try:
+            await asyncio.wait_for(self.message_queue.put(msg), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Tunnel client message queue put timed out (SDP_ANSWER)")
+            raise
 
     async def send_ice_candidate(self, target_id: str, candidate_payload: bytes):
         """Send ICE candidate to peer."""
@@ -247,7 +331,12 @@ class TunnelClient:
             payload=candidate_payload,
             timestamp=int(time.time() * 1000)
         )
-        await self.message_queue.put(msg)
+        # NET-032: Add deadline to prevent indefinite blocking
+        try:
+            await asyncio.wait_for(self.message_queue.put(msg), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Tunnel client message queue put timed out (ICE_CANDIDATE)")
+            raise
     
     async def _reconnect_loop(self):
         """B10: Reconnect with exponential backoff after stream failure."""

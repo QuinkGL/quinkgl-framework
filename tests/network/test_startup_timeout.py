@@ -14,6 +14,9 @@ import pytest
 
 from quinkgl.network.gossip_node import GossipNode, ConnectionMode
 
+# T12: Constant for tunnel server address
+DEFAULT_TUNNEL_SERVER = "localhost:50051"
+
 
 def _make_node(**overrides):
     with patch.object(GossipNode, '__init__', lambda self, **kw: None):
@@ -21,7 +24,7 @@ def _make_node(**overrides):
 
     node.fallback_timeout = overrides.get("fallback_timeout", 30.0)
     node.enable_fallback = overrides.get("enable_fallback", True)
-    node.tunnel_server = overrides.get("tunnel_server", "localhost:50051")
+    node.tunnel_server = overrides.get("tunnel_server", DEFAULT_TUNNEL_SERVER)
     node.node_id = "test-node"
     node.domain = "test"
     node.data_schema_hash = "abc123"
@@ -47,7 +50,7 @@ def _make_node(**overrides):
 @pytest.mark.asyncio
 async def test_zero_peers_with_fallback_returns_false():
     """B12: 0 peers discovered + fallback enabled = IPv8 failure."""
-    node = _make_node(enable_fallback=True, tunnel_server="localhost:50051")
+    node = _make_node(enable_fallback=True, tunnel_server=DEFAULT_TUNNEL_SERVER)
 
     # Simulate: IPv8 starts fine, but discovers 0 peers
     node._wait_for_peers = AsyncMock(side_effect=asyncio.TimeoutError)

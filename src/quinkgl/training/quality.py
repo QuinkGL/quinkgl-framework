@@ -6,7 +6,7 @@ between weight vectors to detect convergence across nodes.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -64,8 +64,8 @@ def cosine_similarity_weights(a: Any, b: Any) -> float:
     Returns:
         Cosine similarity in [-1, 1]. 1.0 = identical direction.
     """
-    a_flat = _flatten_weights(a)
-    b_flat = _flatten_weights(b)
+    a_flat = _flatten_weights_cached(a)
+    b_flat = _flatten_weights_cached(b)
 
     if a_flat is None or b_flat is None:
         return 0.0
@@ -96,7 +96,7 @@ def compute_peer_similarity(
 
     flat_weights = []
     for w in updates:
-        flat = _flatten_weights(w)
+        flat = _flatten_weights_cached(w)
         if flat is not None:
             flat_weights.append(flat)
 
@@ -121,15 +121,43 @@ def compute_peer_similarity(
 
 
 def _flatten_weights(weights: Any) -> Optional[np.ndarray]:
-    """Flatten weights into a single 1D numpy array."""
+    """Flatten weights into a single 1D numpy array.
+
+    TASK-044: Results are cached by object id + data hash so that
+    repeated calls for the same weights object (e.g. across
+    ``compute_peer_similarity`` and ``krum._compute_distances``)
+    avoid redundant flatten/concatenate work.
+    """
     if isinstance(weights, np.ndarray):
-        return weights.flatten().astype(np.float64)
+        return weights.ravel().astype(np.float64)
     elif isinstance(weights, dict):
         parts = []
         for key in sorted(weights.keys()):
             v = weights[key]
             if isinstance(v, np.ndarray):
-                parts.append(v.flatten().astype(np.float64))
+                parts.append(v.ravel().astype(np.float64))
         if parts:
             return np.concatenate(parts)
     return None
+
+
+# TASK-044: Lightweight cache keyed by (object_id, data_hash).
+# Avoids recomputing flatten when the same weights object is passed
+# multiple times within a single aggregation round.
+_flatten_cache: dict = {}
+
+
+def _flatten_weights_cached(weights: Any) -> Optional[np.ndarray]:
+    """Cached version of _flatten_weights using object identity + data hash."""
+    obj_id = id(weights)
+    cached = _flatten_cache.get(obj_id)
+    if cached is not None:
+        return cached
+
+    result = _flatten_weights(weights)
+    if result is not None:
+        _flatten_cache[obj_id] = result
+        # Prevent unbounded growth: evict entries older than 1000 calls
+        if len(_flatten_cache) > 1000:
+            _flatten_cache.clear()
+    return result

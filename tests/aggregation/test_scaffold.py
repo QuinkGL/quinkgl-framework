@@ -345,3 +345,37 @@ class TestPublicImport:
     def test_importable_from_top_level(self):
         from quinkgl import Scaffold
         assert Scaffold is not None
+
+
+# ------------------------------------------------------------------ #
+# Persistence tests (T21)
+# ------------------------------------------------------------------ #
+
+class TestScaffoldPersistence:
+    @pytest.mark.asyncio
+    async def test_control_variate_persistence(self):
+        """Test that global control variate can be persisted and restored."""
+        scaffold1 = Scaffold(learning_rate=0.1, control_momentum=0.5)
+
+        cv = {"__single__": np.array([10.0])}
+        updates = [_make_update("A", np.array([1.0]), control_variate=cv)]
+        await scaffold1.aggregate(updates)
+
+        # Save state
+        state = scaffold1.state_dict()
+
+        # Create new scaffold and restore state
+        scaffold2 = Scaffold()
+        scaffold2.load_state_dict(state)
+
+        # Verify config was restored
+        assert scaffold2.config["learning_rate"] == 0.1
+        assert scaffold2.config["control_momentum"] == 0.5
+
+        # Verify global control variate was restored
+        assert scaffold2.global_control_variate is not None
+        np.testing.assert_allclose(
+            scaffold2.global_control_variate["__single__"],
+            [10.0],
+            atol=1e-6
+        )

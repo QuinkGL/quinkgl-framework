@@ -16,7 +16,7 @@ Reference:
 """
 import asyncio
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any
 from quinkgl.topology.base import TopologyStrategy, SelectionContext, PeerInfo
 from quinkgl.topology.sampler import PeerSampler
 
@@ -161,34 +161,69 @@ class CyclonTopology(TopologyStrategy):
 
     async def _perform_shuffle(self, peer_id: str) -> None:
         """
-        Perform shuffle exchange with a remote peer.
+        Perform shuffle exchange with a remote peer following Voulgaris 2005 §3.2.
+
+        Algorithm (initiator side):
+        1. Select the oldest peer Q from the view (done by caller).
+        2. Select shuffle_length random peers from the view (excluding Q).
+        3. Include own descriptor in the subset.
+        4. Send the subset to Q; Q responds with its own random subset.
+        5. Discard entries sent to Q from the local view (except Q itself).
+        6. Merge received entries into the view, evicting oldest if full.
 
         Args:
-            peer_id: ID of peer to shuffle with.
+            peer_id: ID of peer Q to shuffle with.
         """
         if self._send_shuffle is None:
             logger.debug("No shuffle callback set, skipping shuffle")
             return
 
-        # Prepare peers to send (exclude the target and take shuffle_length)
-        # Send youngest peers, not oldest
+        # Step 2: Select shuffle_length random peers from view, excluding Q
         current_view = self.sampler.get_view()
-        peers_to_send = [p for p in current_view if p.peer_id != peer_id]
+        candidates = [p for p in current_view if p.peer_id != peer_id]
 
-        # Sort by age ascending (youngest first) and take shuffle_length
-        peers_to_send.sort(key=lambda p: p.age)
-        peers_to_send = peers_to_send[:self.shuffle_length]
+        # Random selection (not youngest/oldest) — per §3.2
+        import random
+        selected = random.sample(candidates, min(self.shuffle_length, len(candidates)))
+
+        # Step 3: Include own descriptor in the subset
+        if self._my_peer_info is not None:
+            # Add a fresh copy of self with age 0
+            self_copy = PeerInfo(
+                peer_id=self._my_peer_info.peer_id,
+                domain=self._my_peer_info.domain,
+                data_schema_hash=self._my_peer_info.data_schema_hash,
+                model_version=self._my_peer_info.model_version,
+                age=0,
+            )
+            selected.append(self_copy)
+
+        # Step 5 (pre): Remember which peers we sent so we can discard them
+        my_id = self._my_peer_info.peer_id if self._my_peer_info else None
+        sent_peer_ids = {p.peer_id for p in selected if p.peer_id != my_id}
 
         try:
-            # Send shuffle request and receive remote peer's view
-            remote_peers = await self._send_shuffle(peer_id, peers_to_send)
+            # Step 4: Send shuffle request and receive remote peer's subset
+            remote_peers = await self._send_shuffle(peer_id, selected)
 
-            # Merge remote peers into our view
-            await self.sampler.merge_view(remote_peers, self.shuffle_length)
+            # Step 5: Discard entries that were sent to Q (except Q itself)
+            for pid in sent_peer_ids:
+                if pid in self.sampler and pid != peer_id:
+                    await self.sampler.remove_peer(pid)
+
+            # Step 6: Merge received entries into local view
+            if remote_peers:
+                await self.sampler.merge_view(remote_peers, self.shuffle_length)
+
+            # Reset age of Q after successful exchange
+            if peer_id in self.sampler:
+                peer_info = self.sampler.view.get(peer_id)
+                if peer_info:
+                    peer_info.reset_age()
 
             logger.debug(
                 f"Shuffle completed with {peer_id}: "
-                f"sent={len(peers_to_send)}, received={len(remote_peers) if remote_peers else 0}"
+                f"sent={len(selected)}, received={len(remote_peers) if remote_peers else 0}"
             )
         except Exception as e:
             logger.warning(f"Shuffle with {peer_id} failed: {e}")
@@ -250,27 +285,45 @@ class CyclonTopology(TopologyStrategy):
         remote_peers: List[PeerInfo]
     ) -> List[PeerInfo]:
         """
-        Handle an incoming shuffle request from a remote peer.
+        Handle incoming shuffle request from a peer (receiver side per §3.2).
 
-        This is called when another peer initiates a shuffle with us.
+        Algorithm (receiver side):
+        1. Receive subset S from initiator.
+        2. Select shuffle_length random peers from local view (excluding initiator).
+        3. Send the selected subset back to the initiator.
+        4. Discard entries sent to the initiator from the local view.
+        5. Merge received entries S into the view, evicting oldest if full.
 
         Args:
-            from_peer_id: ID of the peer initiating the shuffle.
-            remote_peers: Peers sent by the remote peer.
+            from_peer_id: ID of the peer sending the shuffle request.
+            remote_peers: List of peers from the remote peer's view.
 
         Returns:
-            List of peers to send back to the remote peer.
+            List of local peers to send back.
         """
-        # Merge the incoming peers into our view
+        import random
+
+        # Step 2: Select random peers from local view (excluding initiator)
+        current_view = self.sampler.get_view()
+        candidates = [p for p in current_view if p.peer_id != from_peer_id]
+        response_peers = random.sample(candidates, min(self.shuffle_length, len(candidates)))
+
+        # Remember which peers we're sending back so we can discard them
+        sent_peer_ids = {p.peer_id for p in response_peers}
+
+        # Step 4: Discard entries sent to initiator from local view
+        for pid in sent_peer_ids:
+            if pid in self.sampler:
+                await self.sampler.remove_peer(pid)
+
+        # Step 5: Merge received entries into local view
         await self.sampler.merge_view(remote_peers, self.shuffle_length)
 
-        # Prepare our response: send youngest peers (excluding the sender)
-        current_view = self.sampler.get_view()
-        response_peers = [p for p in current_view if p.peer_id != from_peer_id]
-
-        # Sort by age ascending (youngest first)
-        response_peers.sort(key=lambda p: p.age)
-        response_peers = response_peers[:self.shuffle_length]
+        # Reset age of initiator after successful exchange
+        if from_peer_id in self.sampler:
+            peer_info = self.sampler.view.get(from_peer_id)
+            if peer_info:
+                peer_info.reset_age()
 
         return response_peers
 
@@ -293,7 +346,8 @@ class CyclonTopology(TopologyStrategy):
                     if self._running:
                         await self.periodic_maintenance(context)
                 except asyncio.CancelledError:
-                    break
+                    logger.debug("Shuffle loop cancelled")
+                    raise  # Re-raise to allow proper cancellation handling
                 except Exception as e:
                     logger.error(f"Error in shuffle loop: {e}")
 

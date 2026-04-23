@@ -22,9 +22,9 @@ import re
 import threading
 import tempfile
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Set, Tuple
+from typing import Any, Dict, Optional, List
 from dataclasses import dataclass, field
 import numpy as np
 import msgpack
@@ -36,11 +36,9 @@ CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Custom Exceptions (optional, for better error handling)
 class ModelStoreError(Exception):
     """Base exception for ModelStore errors."""
-    pass
 
 class CheckpointNotFoundError(ModelStoreError):
     """Raised when a checkpoint is not found."""
-    pass
 
 
 def _validate_checkpoint_id(checkpoint_id: str) -> str:
@@ -62,11 +60,20 @@ def _checkpoint_payload_dict(checkpoint: "ModelCheckpoint") -> Dict[str, Any]:
 @dataclass
 class ModelCheckpoint:
     """
-    Represents a saved model checkpoint.
+    Immutable checkpoint container.
+
+    Attributes:
+        round_number: Training round number
+        weights: Model weights
+        timestamp: UTC timestamp when checkpoint was created
+        metrics: Optional metrics (loss, accuracy, etc.)
+        contributing_peers: List of peer IDs that contributed
+        checkpoint_id: Unique identifier for this checkpoint
+        checksum: SHA256 checksum for data integrity
     """
     round_number: int
     weights: Any
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metrics: Dict[str, float] = field(default_factory=dict)
     contributing_peers: List[str] = field(default_factory=list)
     checkpoint_id: str = ""
@@ -89,9 +96,10 @@ class ModelCheckpoint:
             self.checksum = self._compute_checksum()
 
     def _compute_checksum(self) -> str:
-        """Compute SHA256 checksum of the checkpoint metadata."""
+        """Compute SHA256 checksum of the full checkpoint serialized bytes."""
         payload = _checkpoint_payload_dict(self)
-        return hashlib.sha256(msgpack.packb(payload, use_bin_type=True)).hexdigest()[:16]
+        serialized = msgpack.packb(payload, use_bin_type=True)
+        return hashlib.sha256(serialized).hexdigest()
 
     def verify_checksum(self) -> bool:
         """Verify that the stored checksum matches the computed one."""
@@ -222,7 +230,9 @@ def _deserialize_checkpoint(data: bytes, compressed: bool = False) -> ModelCheck
     """Deserialize bytes to a checkpoint using msgpack."""
     try:
         if compressed:
-            data = zlib.decompress(data)
+            # Bound decompression to prevent decompression bomb attacks
+            max_expansion = len(data) * 100  # Limit expansion to 100x
+            data = zlib.decompress(data, max_length=max_expansion)
 
         unpacked = msgpack.unpackb(data, raw=False)
 
@@ -283,6 +293,9 @@ class ModelStore:
         # Thread safety
         self._lock = threading.RLock()
 
+        # ST-09: Flag to log .pkl scan warning only once
+        self._pkl_scan_logged = False
+
         # Cache for list_checkpoints to avoid repeated disk scans
         self._list_cache: Optional[List[ModelCheckpoint]] = None
         self._cache_dirty: bool = True
@@ -332,6 +345,15 @@ class ModelStore:
         )
         # Old format (for migration warning only)
         files.extend(self.storage_dir.glob("checkpoint_*.pkl"))
+        
+        # ST-09: Log .pkl scan warning only once
+        if files and not self._pkl_scan_logged:
+            logger.warning(
+                "Found old .pkl checkpoint files. These are not loaded for security reasons. "
+                "Please migrate checkpoints to msgpack format."
+            )
+            self._pkl_scan_logged = True
+        
         return files
 
     def _invalidate_cache(self) -> None:
@@ -608,32 +630,20 @@ class ModelStore:
     async def get_latest_checkpoint_async(self) -> Optional[ModelCheckpoint]:
         return await asyncio.to_thread(self.get_latest_checkpoint)
 
-    def list_checkpoints(self) -> List[ModelCheckpoint]:
+    def list_checkpoints(self) -> List[CheckpointMetadata]:
         """
         List all stored checkpoints with caching (thread-safe).
 
-        ST-06: Returns memory checkpoints; disk checkpoints are loaded lazily.
-        Use list_checkpoint_metadata() for lightweight disk enumeration.
+        ST-06: Returns lightweight CheckpointMetadata instead of full ModelCheckpoint.
 
         Returns:
-            List of ModelCheckpoint objects sorted by round number
+            List of CheckpointMetadata objects sorted by round number
         """
         with self._lock:
-            # Use cache if available and not dirty
-            if not self._cache_dirty and self._list_cache is not None:
-                return self._list_cache.copy()
+            return self.list_checkpoint_metadata()
 
-            # ST-06: Only return memory checkpoints; don't full-load disk checkpoints
-            checkpoints = list(self._checkpoints.values())
-
-            # Sort by round number
-            checkpoints.sort(key=lambda c: c.round_number)
-
-            # Update cache
-            self._list_cache = checkpoints
-            self._cache_dirty = False
-
-            return checkpoints.copy()
+    async def list_checkpoints_async(self) -> List[CheckpointMetadata]:
+        return await asyncio.to_thread(self.list_checkpoints)
 
     def list_checkpoint_metadata(self) -> List[CheckpointMetadata]:
         with self._lock:
@@ -703,15 +713,25 @@ class ModelStore:
 
             # Remove from disk (try all formats)
             if self.storage_dir:
+                deleted_count = 0
                 for ext in [".msgpack.gz", ".msgpack", ".pkl"]:
                     filepath = self.storage_dir / f"checkpoint_{checkpoint_id}{ext}"
                     if filepath.exists():
                         filepath.unlink()
                         found = True
+                        deleted_count += 1
                 metadata_path = self._get_metadata_path(checkpoint_id)
                 if metadata_path.exists():
                     metadata_path.unlink()
                     found = True
+                    deleted_count += 1
+                
+                # ST-11: Warn if multiple variants were removed
+                if deleted_count > 1:
+                    logger.warning(
+                        f"Deleted {deleted_count} file variants for checkpoint {checkpoint_id}. "
+                        f"This may indicate stale checkpoint files from previous runs."
+                    )
 
             return found
 

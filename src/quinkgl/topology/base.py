@@ -129,7 +129,6 @@ class TopologyStrategy(ABC):
         Returns:
             List of peer IDs to send updates to
         """
-        pass
 
     @abstractmethod
     async def should_accept_connection(
@@ -138,16 +137,47 @@ class TopologyStrategy(ABC):
         peer_info: PeerInfo
     ) -> bool:
         """
-        Decide whether to accept an incoming connection from a peer.
+        Determine if a connection from a peer should be accepted.
+
+        Default implementation checks compatibility based on:
+        - manifest_id (if both have it)
+        - domain
+        - data_schema_hash
+        - model_version compatibility
 
         Args:
             context: Current execution context
-            peer_info: Information about the peer requesting connection
+            peer_info: Information about the peer
 
         Returns:
-            True if connection should be accepted, False otherwise
+            True if the connection should be accepted
         """
-        pass
+        # Check manifest_id first if available
+        if context.my_manifest_id is not None and peer_info.manifest_id is not None:
+            return peer_info.manifest_id == context.my_manifest_id
+        
+        # Check domain compatibility
+        if peer_info.domain != context.my_domain:
+            return False
+        
+        # Check data schema hash compatibility
+        if peer_info.data_schema_hash != context.my_data_schema_hash:
+            return False
+        
+        # Check model version compatibility
+        if not self._is_version_compatible(context.my_model_version, peer_info.model_version):
+            return False
+        
+        return True
+    
+    def _is_version_compatible(self, my_version: str, peer_version: str) -> bool:
+        """Check if two model versions are compatible (same major version)."""
+        try:
+            my_major = my_version.split('.')[0]
+            peer_major = peer_version.split('.')[0]
+            return my_major == peer_major
+        except (IndexError, AttributeError):
+            return True  # Fallback: assume compatible if version format is unexpected
 
     async def periodic_maintenance(self, context: SelectionContext) -> None:
         """
@@ -156,7 +186,19 @@ class TopologyStrategy(ABC):
         Args:
             context: Current execution context
         """
-        pass
+
+    async def start(self, context: SelectionContext) -> None:
+        """
+        Start the topology strategy (e.g., begin periodic maintenance tasks).
+
+        Args:
+            context: Current execution context
+        """
+
+    async def stop(self) -> None:
+        """
+        Stop the topology strategy (e.g., cancel periodic maintenance tasks).
+        """
 
     def get_active_view(self) -> List[PeerInfo]:
         """
@@ -177,7 +219,6 @@ class TopologyStrategy(ABC):
         Args:
             peer_id: ID of the disconnected peer
         """
-        pass
 
     async def on_new_peer_discovered(self, peer_info: PeerInfo) -> None:
         """
@@ -186,4 +227,3 @@ class TopologyStrategy(ABC):
         Args:
             peer_info: Information about the newly discovered peer
         """
-        pass

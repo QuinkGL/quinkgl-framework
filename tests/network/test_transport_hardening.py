@@ -79,6 +79,8 @@ class TestFingerprintCap:
         community.data_schema_hash = "abc"
         community.known_peers = {}
         community._mid_to_node_id = {}
+        community._MAX_KNOWN_PEERS = 500
+        community.require_signature = False
         community.on_peer_discovered_callback = None
 
         peer = MagicMock()
@@ -94,7 +96,7 @@ class TestFingerprintCap:
             fingerprint_json=big_fp,
         )
 
-        await GossipLearningCommunity.on_discovery_announce.__wrapped__(
+        await GossipLearningCommunity._dispatch_discovery_announce(
             community, peer, payload
         )
 
@@ -160,6 +162,8 @@ class TestIdentityBinding:
         community.data_schema_hash = "abc"
         community.known_peers = {}
         community._mid_to_node_id = {}
+        community._MAX_KNOWN_PEERS = 500
+        community.require_signature = False
         community.on_peer_discovered_callback = None
 
         peer = MagicMock()
@@ -172,7 +176,7 @@ class TestIdentityBinding:
             model_version="1.0.0",
         )
 
-        await GossipLearningCommunity.on_discovery_announce.__wrapped__(
+        await GossipLearningCommunity._dispatch_discovery_announce(
             community, peer, payload
         )
 
@@ -210,7 +214,7 @@ class TestIdentityBinding:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_update(
             community, peer, payload
         )
 
@@ -247,7 +251,7 @@ class TestIdentityBinding:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(
+        await GossipLearningCommunity._dispatch_model_update(
             community, peer, payload
         )
 
@@ -282,7 +286,7 @@ class TestRequireSignaturePolicy:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         assert community._last_seen_round == {}
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
@@ -322,7 +326,7 @@ class TestRequireSignaturePolicy:
             chunk_data=b"\x00" * 10,
         )
 
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
 
         assert community._chunk_buffers == {}
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
@@ -358,7 +362,7 @@ class TestRequireSignaturePolicy:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         assert community._last_seen_round.get(pmid) == 3
         community.event_emitter.emit.assert_not_called()
@@ -403,7 +407,7 @@ class TestIPv8SecurityEvents:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.identity_mismatch", "ipv8_payload_dropped"]
@@ -425,7 +429,7 @@ class TestIPv8SecurityEvents:
             signature=b"bad",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.signature_rejected", "ipv8_payload_dropped"]
@@ -446,7 +450,7 @@ class TestIPv8SecurityEvents:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.replay_rejected", "ipv8_payload_dropped"]
@@ -467,7 +471,7 @@ class TestIPv8SecurityEvents:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.future_round_rejected", "ipv8_payload_dropped"]
@@ -487,7 +491,7 @@ class TestIPv8SecurityEvents:
             data_schema_hash="abc",
         )
 
-        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_update(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.oversized_message", "ipv8_payload_dropped"]
@@ -514,7 +518,7 @@ class TestIPv8SecurityEvents:
             signature=b"bad",
         )
 
-        await GossipLearningCommunity.on_model_chunk.__wrapped__(community, peer, payload)
+        await GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.signature_rejected", "ipv8_payload_dropped"]

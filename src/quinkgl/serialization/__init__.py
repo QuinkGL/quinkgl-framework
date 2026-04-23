@@ -23,6 +23,7 @@ from quinkgl.serialization.compression import (
     CompressionConfig,
     compress_weights,
     decompress_weights,
+    compress_decompress_roundtrip,
 )
 from quinkgl.serialization.error_feedback import (
     ErrorFeedbackState,
@@ -37,5 +38,6 @@ __all__ = [
     "sparsify_weights", "desparsify_weights",
     "compute_delta", "apply_delta",
     "CompressionConfig", "compress_weights", "decompress_weights",
+    "compress_decompress_roundtrip",
     "ErrorFeedbackState", "ErrorFeedbackConfig",
 ]

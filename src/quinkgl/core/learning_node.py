@@ -20,11 +20,10 @@ This is the framework layer - network layer is handled separately.
 """
 
 import logging
-import asyncio
-from typing import Optional, Any, Callable, List
+from typing import Optional, Callable, List
 
 from quinkgl.models.base import ModelWrapper, TrainingConfig
-from quinkgl.topology.base import TopologyStrategy, SelectionContext, PeerInfo
+from quinkgl.topology.base import TopologyStrategy, PeerInfo
 from quinkgl.aggregation.base import AggregationStrategy
 from quinkgl.gossip.aggregator import ModelAggregator
 from quinkgl.storage.model_store import ModelStore

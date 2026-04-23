@@ -11,7 +11,7 @@ References:
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
 
@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 class QuantizationConfig:
     bits: int = 8
     method: str = "linear"
+    seed: int = 42  # RNG seed for reproducibility
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if self.bits not in [4, 8, 16, 32]:
+            raise ValueError(
+                f"Invalid bits value: {self.bits}. "
+                f"Must be one of [4, 8, 16, 32]."
+            )
+        if self.method not in ["linear", "stochastic"]:
+            raise ValueError(
+                f"Invalid quantization method: {self.method}. "
+                f"Must be 'linear' or 'stochastic'."
+            )
 
 
 @dataclass

@@ -32,3 +32,18 @@ def test_tensorflow_symbol_export_tracks_availability():
         assert "TensorFlowModel" in quinkgl.__all__
     else:
         assert "TensorFlowModel" not in quinkgl.__all__
+
+
+def test_all_exported_names_are_importable():
+    """T3: Verify every name in quinkgl.__all__ can be imported without error."""
+    for name in quinkgl.__all__:
+        # Skip module-level attributes that aren't actually imports
+        if name.startswith("_"):
+            continue
+        # Try to get the attribute from quinkgl
+        assert hasattr(quinkgl, name), f"{name} is in __all__ but not accessible on quinkgl module"
+        attr = getattr(quinkgl, name)
+        # If it's None (e.g., TensorFlowModel when TF not installed), that's okay
+        # as long as the attribute exists
+        if attr is not None or name == "_tensorflow_available" or name == "_data_available":
+            continue

@@ -4,11 +4,10 @@ IPv8 Manager for QuinkGL P2P Networking
 Manages IPv8 instance lifecycle and community registration.
 """
 
-import asyncio
 import logging
 from typing import List, Optional
 
-from ipv8.configuration import ConfigBuilder, Strategy, WalkerDefinition, default_bootstrap_defs
+from ipv8.configuration import ConfigBuilder
 from ipv8.community import Community
 from ipv8_service import IPv8
 
@@ -56,12 +55,18 @@ class IPv8Manager:
             return
 
         try:
-            # Create working directory if it doesn't exist (portable for Windows)
+            # Create working directory if it doesn't exist (use XDG config dir for persistence)
             import os
-            import tempfile
-            temp_dir = tempfile.gettempdir()
-            work_dir = os.path.join(temp_dir, f"ipv8_quinkgl_{self.node_id}")
-            key_file = os.path.join(temp_dir, f"ipv8_quinkgl_{self.node_id}.pem")
+            try:
+                # Try XDG config directory for persistent storage
+                from xdg import BaseDirectory
+                config_dir = BaseDirectory.save_config_path("quinkgl")
+            except ImportError:
+                # Fallback to user home directory
+                config_dir = os.path.expanduser("~/.config/quinkgl")
+            
+            work_dir = os.path.join(config_dir, f"ipv8_quinkgl_{self.node_id}")
+            key_file = os.path.join(config_dir, f"ipv8_quinkgl_{self.node_id}.pem")
             os.makedirs(work_dir, exist_ok=True)
             if not getattr(self, 'last_seen_round_state_path', ''):
                 self.last_seen_round_state_path = os.path.join(work_dir, 'last_seen_round.json')

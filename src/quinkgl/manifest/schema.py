@@ -188,11 +188,16 @@ def _parse_rfc3339(value: str, field_name: str) -> datetime:
 
 @dataclass
 class CollaborationPolicy:
+    """Collaboration policy for swarm membership.
+
+    T-03: Added AffinityWeights for multi-signal affinity computation.
+    """
     version: int = 1
     mode: str = "personalized"
     exploration_initial: float = 0.8
     exploration_decay: float = 0.95
     exploration_min: float = 0.1
+    affinity_weights: Optional[Dict[str, float]] = None
     ema_alpha: float = 0.2
     edge_decay_factor: float = 0.95
     eviction_min_weight: float = 0.05
@@ -382,6 +387,11 @@ class PrototypePolicy:
 
 @dataclass
 class DataPolicy:
+    """Data policy configuration for swarm membership.
+
+    T-08: Added version field for policy versioning.
+    """
+    version: int = 1
     schema_version: int = MANIFEST_SCHEMA_VERSION
     fingerprint_enabled: bool = True
     min_affinity: float = 0.3
@@ -604,8 +614,85 @@ class DataPolicy:
         self.prototypes.validate()
 
     def apply_join_policy(self) -> None:
-        """Validate and apply policy when joining a swarm (§8.2 steps 2–6)."""
+        """Validate and apply policy when joining a swarm (§8.2 steps 2–6).
+
+        Steps:
+          2. Validate all individual fields (delegated to ``validate``).
+          3. Enforce privacy-level constraints on noise and granularity.
+          4. Enforce fingerprint requirements for personalized collaboration.
+          5. Validate DP parameter consistency (epsilon/delta/sigma).
+          6. Enforce collaboration-mode constraints on affinity weights.
+        """
+        # Step 2: Basic field validation
         self.validate()
+
+        # Step 3: Privacy-level constraints
+        if self.privacy_level == "strict":
+            if self.label_granularity == "exact":
+                raise ValueError(
+                    "privacy_level='strict' requires label_granularity != 'exact'; "
+                    "use 'bucket' or 'coarse'"
+                )
+            if self.feature_noise_sigma < 0.5:
+                raise ValueError(
+                    f"privacy_level='strict' requires feature_noise_sigma >= 0.5, "
+                    f"got {self.feature_noise_sigma}"
+                )
+            if self.gradient_noise_sigma < 0.2:
+                raise ValueError(
+                    f"privacy_level='strict' requires gradient_noise_sigma >= 0.2, "
+                    f"got {self.gradient_noise_sigma}"
+                )
+            if not self.hash_label_keys:
+                raise ValueError(
+                    "privacy_level='strict' requires hash_label_keys=True"
+                )
+        elif self.privacy_level == "relaxed":
+            if self.label_granularity == "coarse":
+                raise ValueError(
+                    "privacy_level='relaxed' should not use label_granularity='coarse'; "
+                    "use 'exact' or 'bucket'"
+                )
+
+        # Step 4: Fingerprint requirements for personalized collaboration
+        if self.collaboration.mode == "personalized" and not self.fingerprint_enabled:
+            raise ValueError(
+                "collaboration.mode='personalized' requires fingerprint_enabled=True "
+                "for affinity-based peer selection"
+            )
+
+        # Step 5: DP parameter consistency
+        if self.feature_dp_epsilon is not None:
+            if self.feature_noise_sigma <= 0.0:
+                raise ValueError(
+                    "feature_dp_epsilon is set but feature_noise_sigma=0; "
+                    "DP requires non-zero noise"
+                )
+        if self.gradient_dp_epsilon is not None:
+            if self.gradient_noise_sigma <= 0.0:
+                raise ValueError(
+                    "gradient_dp_epsilon is set but gradient_noise_sigma=0; "
+                    "DP requires non-zero noise"
+                )
+            if not self.gradient_fingerprint:
+                raise ValueError(
+                    "gradient_dp_epsilon is set but gradient_fingerprint=False; "
+                    "gradient DP requires gradient fingerprinting enabled"
+                )
+
+        # Step 6: Collaboration-mode constraints on affinity weights
+        if self.collaboration.mode == "personalized":
+            total_w = (
+                self.collaboration.affinity_label_w
+                + self.collaboration.affinity_feature_w
+                + self.collaboration.affinity_gradient_w
+                + self.collaboration.affinity_history_w
+            )
+            if total_w <= 0.0:
+                raise ValueError(
+                    "collaboration.mode='personalized' requires at least one "
+                    f"non-zero affinity weight (total={total_w})"
+                )
 
     def canonical_bytes(self) -> bytes:
         return json.dumps(
@@ -1075,6 +1162,13 @@ class SwarmManifest:
         if not self.data_schema_hash:
             raise ValueError("data_schema_hash must be non-empty")
         self.data_policy.validate()
+        # T-12: Cap manifest size to prevent DoS
+        manifest_bytes = self.canonical_bytes()
+        MAX_MANIFEST_SIZE = 10240  # 10KB
+        if len(manifest_bytes) > MAX_MANIFEST_SIZE:
+            raise ValueError(
+                f"manifest size {len(manifest_bytes)} bytes exceeds maximum {MAX_MANIFEST_SIZE} bytes"
+            )
 
     def _validate_v3_fields(self) -> None:
         """Run the §4.7.8 per-field checks — used by strict loading and by

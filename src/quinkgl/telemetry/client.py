@@ -17,6 +17,28 @@ from quinkgl.telemetry.api import (
 
 logger = logging.getLogger(__name__)
 
+# T-OBS-10: Module-level shared httpx.AsyncClient for connection pooling
+_module_http_client: Optional[httpx.AsyncClient] = None
+_module_http_client_lock = asyncio.Lock()
+
+
+async def get_module_http_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Get or create the module-level shared httpx.AsyncClient."""
+    global _module_http_client
+    async with _module_http_client_lock:
+        if _module_http_client is None or _module_http_client.is_closed:
+            _module_http_client = httpx.AsyncClient(timeout=timeout)
+        return _module_http_client
+
+
+async def close_module_http_client() -> None:
+    """Close the module-level shared httpx.AsyncClient."""
+    global _module_http_client
+    async with _module_http_client_lock:
+        if _module_http_client is not None and not _module_http_client.is_closed:
+            await _module_http_client.aclose()
+        _module_http_client = None
+
 
 JsonDict = Dict[str, Any]
 AsyncSink = Callable[[JsonDict], Awaitable[None]]
@@ -56,7 +78,6 @@ class TelemetryClient:
         self._status_provider: Optional[Callable[[], JsonDict]] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._background_tasks: set[asyncio.Task] = set()
-        self._http_client: Optional[httpx.AsyncClient] = None
         self._delivery_lock = asyncio.Lock()
         self._pending_deliveries: Deque[Tuple[str, JsonDict]] = deque()
         self.max_pending_items = max_pending_items
@@ -106,13 +127,12 @@ class TelemetryClient:
             return None
         return self._track_task(loop.create_task(coro))
 
-    def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=self.timeout)
-        return self._http_client
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        # T-OBS-10: Use module-level shared httpx.AsyncClient
+        return await get_module_http_client(self.timeout)
 
     async def _post_json(self, path: str, payload: JsonDict) -> None:
-        client = self._get_http_client()
+        client = await self._get_http_client()
         response = await client.post(
             f"{self.base_url}{path}",
             json=payload,
@@ -201,7 +221,17 @@ class TelemetryClient:
         if self.max_pending_items <= 0:
             return
         if len(self._pending_deliveries) >= self.max_pending_items:
-            self._pending_deliveries.popleft()
+            dropped = self._pending_deliveries.popleft()
+            # T-OBS-09: Emit telemetry.events_dropped when queue overflows
+            self._emit_runtime_event(
+                "telemetry.events_dropped",
+                {
+                    "base_url": self.base_url,
+                    "dropped_kind": dropped[0],
+                    "queue_size": len(self._pending_deliveries),
+                    "max_pending_items": self.max_pending_items,
+                },
+            )
         self._pending_deliveries.append((kind, deepcopy(payload)))
 
     async def _deliver_with_retry(self, kind: str, payload: JsonDict) -> tuple[bool, Optional[Exception]]:
@@ -289,16 +319,16 @@ class TelemetryClient:
         current_task = asyncio.current_task()
         pending_tasks = [
             task for task in list(self._background_tasks)
-            if task is not current_task and not task.done()
+            if task != current_task and not task.done()
         ]
         for task in pending_tasks:
             task.cancel()
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
-        if self._http_client is not None and not self._http_client.is_closed:
-            await self._http_client.aclose()
-        self._http_client = None
-        self._heartbeat_task = None
+        self._background_tasks.clear()
+
+        # T-OBS-10: Close module-level httpx client
+        await close_module_http_client()
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -306,6 +336,9 @@ class TelemetryClient:
                 try:
                     snapshot = self._status_provider()
                 except Exception as exc:
+                    logger.exception("Failed to get status snapshot in heartbeat loop")
+                    # Continue with empty snapshot to avoid breaking the heartbeat
+                    snapshot = {}
                     logger.warning("Telemetry status provider failed: %s", exc)
                     self._emit_runtime_event(
                         "telemetry.status_provider_warning",
