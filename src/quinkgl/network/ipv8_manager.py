@@ -63,6 +63,8 @@ class IPv8Manager:
             work_dir = os.path.join(temp_dir, f"ipv8_quinkgl_{self.node_id}")
             key_file = os.path.join(temp_dir, f"ipv8_quinkgl_{self.node_id}.pem")
             os.makedirs(work_dir, exist_ok=True)
+            if not getattr(self, 'last_seen_round_state_path', ''):
+                self.last_seen_round_state_path = os.path.join(work_dir, 'last_seen_round.json')
 
             # Build IPv8 configuration
             builder = ConfigBuilder().clear_keys().clear_overlays()
@@ -93,6 +95,12 @@ class IPv8Manager:
                     community_settings['domain'] = self.domain
                 if hasattr(self, 'data_schema_hash'):
                     community_settings['data_schema_hash'] = self.data_schema_hash
+                if hasattr(self, 'require_signature'):
+                    community_settings['require_signature'] = self.require_signature
+                if hasattr(self, 'last_seen_round_state_path'):
+                    community_settings['last_seen_round_state_path'] = self.last_seen_round_state_path
+                if hasattr(self, 'max_round_skip'):
+                    community_settings['max_round_skip'] = self.max_round_skip
 
                 builder.add_overlay(
                     community_class.__name__,

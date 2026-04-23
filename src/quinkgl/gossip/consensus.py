@@ -75,10 +75,12 @@ class ConsensusTracker:
         self.min_peers_for_consensus = min_peers_for_consensus
         self.max_round_ahead = max_round_ahead
         self._checkpoints: Dict[int, Dict[str, PeerCheckpoint]] = {}
-        self._last_checkpoint_round: int = 0
+        # A5 §3.4: separate local checkpoint round from max-seen peer round
+        self._last_local_checkpoint_round: int = 0
+        self._last_seen_checkpoint_round: int = 0
 
     def should_checkpoint(self, current_round: int) -> bool:
-        if current_round - self._last_checkpoint_round >= self.checkpoint_interval:
+        if current_round - self._last_local_checkpoint_round >= self.checkpoint_interval:
             return True
         return False
 
@@ -86,7 +88,7 @@ class ConsensusTracker:
         rnd = checkpoint.round_number
 
         # Clamp implausibly high round numbers (A5 §3.2)
-        max_allowed = self._last_checkpoint_round + self.max_round_ahead
+        max_allowed = self._last_seen_checkpoint_round + self.max_round_ahead
         if rnd > max_allowed:
             logger.debug(
                 f"Clamping checkpoint round {rnd} → {max_allowed} "
@@ -113,7 +115,7 @@ class ConsensusTracker:
             return
 
         self._checkpoints[rnd][checkpoint.peer_id] = checkpoint
-        self._last_checkpoint_round = max(self._last_checkpoint_round, rnd)
+        self._last_seen_checkpoint_round = max(self._last_seen_checkpoint_round, rnd)
 
     def check_consensus(self, round_number: Optional[int] = None) -> Optional[ConsensusResult]:
         """
@@ -176,4 +178,9 @@ class ConsensusTracker:
 
     @property
     def last_checkpoint_round(self) -> int:
-        return self._last_checkpoint_round
+        """Max round seen from any peer (not our own local checkpoint round)."""
+        return self._last_seen_checkpoint_round
+
+    def record_local_checkpoint(self, round_number: int) -> None:
+        """Update the local checkpoint round after broadcasting our own checkpoint."""
+        self._last_local_checkpoint_round = max(self._last_local_checkpoint_round, round_number)

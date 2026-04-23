@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
@@ -14,11 +13,62 @@ from quinkgl.telemetry.models import (
 )
 
 
+DEFAULT_TELEMETRY_MAX_NODES = 256
+DEFAULT_TELEMETRY_MAX_EVENTS_PER_NODE = 500
+DEFAULT_TELEMETRY_MAX_ROUNDS_PER_NODE = 128
+DEFAULT_TELEMETRY_MAX_EDGES = 2048
+DEFAULT_TELEMETRY_MAX_PEER_IDS_PER_NODE = 256
+SUPPORTED_TELEMETRY_EVENT_TYPES = {
+    "aggregation_completed",
+    "aggregation_failed",
+    "consensus_reached",
+    "early_stopping",
+    "ipv8_payload_dropped",
+    "model_received",
+    "model_rejected_backpressure",
+    "model_rejected_stale",
+    "model_send_failed",
+    "model_send_started",
+    "model_sent",
+    "models_converged",
+    "node.config",
+    "node.started",
+    "node.stopped",
+    "peer_disconnected",
+    "peer_discovered",
+    "post_aggregation_eval",
+    "subscriber.error",
+    "targets_selected",
+    "telemetry.connected",
+    "telemetry.delivery_failed",
+    "telemetry.disconnected",
+    "telemetry.events_dropped",
+    "telemetry.status_provider_warning",
+    "training_completed",
+    "training_started",
+    "tunnel_payload_dropped",
+}
+
+
 class TelemetryStore:
     """In-memory session telemetry store for the dashboard backend."""
 
-    def __init__(self, session_id: Optional[str] = None):
+    def __init__(
+        self,
+        session_id: Optional[str] = None,
+        *,
+        max_nodes: int = DEFAULT_TELEMETRY_MAX_NODES,
+        max_events_per_node: int = DEFAULT_TELEMETRY_MAX_EVENTS_PER_NODE,
+        max_rounds_per_node: int = DEFAULT_TELEMETRY_MAX_ROUNDS_PER_NODE,
+        max_edges: int = DEFAULT_TELEMETRY_MAX_EDGES,
+        max_peer_ids_per_node: int = DEFAULT_TELEMETRY_MAX_PEER_IDS_PER_NODE,
+    ):
         self.session = SessionSnapshot(session_id=session_id or uuid4().hex)
+        self.max_nodes = max_nodes
+        self.max_events_per_node = max_events_per_node
+        self.max_rounds_per_node = max_rounds_per_node
+        self.max_edges = max_edges
+        self.max_peer_ids_per_node = max_peer_ids_per_node
         self.connection: Dict[str, Any] = {
             "status": "idle",
             "detail": "Waiting for telemetry bootstrap",
@@ -29,23 +79,32 @@ class TelemetryStore:
             "last_connected_at": None,
         }
         self._nodes: Dict[str, NodeSnapshot] = {}
-        self._events: Dict[str, List[NodeEvent]] = defaultdict(list)
-        self._rounds: Dict[str, Dict[int, NodeRoundSummary]] = defaultdict(dict)
+        self._events: Dict[str, List[NodeEvent]] = {}
+        self._rounds: Dict[str, Dict[int, NodeRoundSummary]] = {}
         self._edges: Dict[Tuple[str, str, str], NetworkEdge] = {}
 
     def ingest_heartbeat(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         timestamp = _parse_datetime(snapshot.get("timestamp")) or datetime.now()
-        node_id = snapshot["node_id"]
+        node_id = self._require_non_empty_node_id(snapshot.get("node_id"))
         node = self._get_or_create_node(node_id, snapshot.get("domain"), timestamp)
         node.domain = snapshot.get("domain", node.domain)
         node.connection_mode = snapshot.get("connection_mode", node.connection_mode)
         node.running = bool(snapshot.get("running", node.running))
         node.status = "running" if node.running else "idle"
-        node.current_round = int(snapshot.get("current_round", node.current_round or 0))
-        node.peer_ids = list(snapshot.get("known_peers", snapshot.get("peer_ids", node.peer_ids)))
-        node.known_peer_count = int(
+        node.current_round = self._coerce_int(
+            snapshot.get("current_round"),
+            default=node.current_round or 0,
+            field_name="current_round",
+        )
+        node.peer_ids = self._cap_sequence(
+            list(snapshot.get("known_peers", snapshot.get("peer_ids", node.peer_ids))),
+            self.max_peer_ids_per_node,
+        )
+        node.known_peer_count = self._coerce_int(
             snapshot.get("known_peer_count", snapshot.get("ipv8_peers", 0) + snapshot.get("tunnel_peers", 0))
-            or len(node.peer_ids)
+            or len(node.peer_ids),
+            default=len(node.peer_ids),
+            field_name="known_peer_count",
         )
         node.refresh_uptime(timestamp)
         return self._broadcasts_for(node, None, None)
@@ -74,12 +133,15 @@ class TelemetryStore:
 
     def ingest_event(self, event_type: str, payload: Dict[str, Any], timestamp: Optional[datetime] = None) -> List[Dict[str, Any]]:
         timestamp = timestamp or datetime.now()
-        node_id = payload["node_id"]
+        if not self._is_supported_event_type(event_type):
+            raise ValueError(f"Unknown telemetry event type: {event_type}")
+        node_id = self._require_non_empty_node_id(payload.get("node_id"))
         node = self._get_or_create_node(node_id, payload.get("domain"), timestamp)
         event = NodeEvent(event_type=event_type, timestamp=timestamp, payload=dict(payload))
-        self._events[node_id].append(event)
-        if len(self._events[node_id]) > 500:
-            self._events[node_id] = self._events[node_id][-500:]
+        node_events = self._events.setdefault(node_id, [])
+        node_events.append(event)
+        if self.max_events_per_node > 0 and len(node_events) > self.max_events_per_node:
+            self._events[node_id] = node_events[-self.max_events_per_node:]
 
         edge: Optional[NetworkEdge] = None
         round_summary = self._round_summary_for(node_id, payload.get("round"))
@@ -90,7 +152,7 @@ class TelemetryStore:
             node.last_accuracy = payload.get("accuracy")
             node.last_samples_trained = payload.get("samples_trained")
             node.last_training_at = timestamp
-            node.current_round = int(payload.get("round") or node.current_round)
+            node.current_round = self._coerce_int(payload.get("round"), default=node.current_round, field_name="round")
             node.training_rounds_completed = max(
                 node.training_rounds_completed,
                 node.current_round,
@@ -102,20 +164,20 @@ class TelemetryStore:
                 round_summary.updated_at = timestamp
         elif event_type == "targets_selected":
             targets = list(payload.get("selected_targets") or [])
-            node.last_selected_peer_ids = targets
+            node.last_selected_peer_ids = self._cap_sequence(targets, self.max_peer_ids_per_node)
             if round_summary:
-                round_summary.selected_targets = targets
+                round_summary.selected_targets = self._cap_sequence(targets, self.max_peer_ids_per_node)
                 round_summary.updated_at = timestamp
         elif event_type == "model_sent":
             peer_ids = list(payload.get("peer_ids") or [])
-            round_number = int(payload["round"]) if payload.get("round") is not None else None
+            round_number = self._coerce_int(payload.get("round"), default=None, field_name="round")
             weight_summary = dict(payload.get("weight_summary") or {})
             node.models_sent += len(peer_ids)
             node.last_send_at = timestamp
-            node.last_sent_peer_ids = peer_ids
+            node.last_sent_peer_ids = self._cap_sequence(peer_ids, self.max_peer_ids_per_node)
             node.last_weight_summary = weight_summary
             if round_summary:
-                round_summary.sent_peer_ids = peer_ids
+                round_summary.sent_peer_ids = self._cap_sequence(peer_ids, self.max_peer_ids_per_node)
                 round_summary.updated_at = timestamp
             for peer_id in peer_ids:
                 edge = self._touch_edge(
@@ -130,7 +192,7 @@ class TelemetryStore:
                 )
         elif event_type == "model_received":
             peer_id = payload.get("peer_id")
-            round_number = int(payload["round"]) if payload.get("round") is not None else None
+            round_number = self._coerce_int(payload.get("round"), default=None, field_name="round")
             weight_summary = dict(payload.get("weight_summary") or {})
             node.models_received += 1
             node.last_receive_at = timestamp
@@ -138,6 +200,10 @@ class TelemetryStore:
             node.last_weight_summary = weight_summary
             if round_summary and peer_id and peer_id not in round_summary.received_peer_ids:
                 round_summary.received_peer_ids.append(peer_id)
+                round_summary.received_peer_ids = self._cap_sequence(
+                    round_summary.received_peer_ids,
+                    self.max_peer_ids_per_node,
+                )
                 round_summary.updated_at = timestamp
             if peer_id:
                 edge = self._touch_edge(
@@ -158,15 +224,16 @@ class TelemetryStore:
             node.last_aggregation_total_samples = payload.get("sample_count")
             node.last_weight_summary = dict(payload.get("weight_summary") or {})
             if round_summary:
-                round_summary.aggregated_peer_ids = peer_ids
+                round_summary.aggregated_peer_ids = self._cap_sequence(peer_ids, self.max_peer_ids_per_node)
                 round_summary.aggregation_total_samples = payload.get("sample_count")
                 round_summary.updated_at = timestamp
         elif event_type == "peer_discovered":
             peer_id = payload.get("peer_id")
-            round_number = int(payload["round"]) if payload.get("round") is not None else None
+            round_number = self._coerce_int(payload.get("round"), default=None, field_name="round")
             if peer_id:
                 if peer_id not in node.peer_ids:
                     node.peer_ids.append(peer_id)
+                    node.peer_ids = self._cap_sequence(node.peer_ids, self.max_peer_ids_per_node)
                 node.known_peer_count = len(node.peer_ids)
                 edge = self._touch_edge(
                     node_id,
@@ -260,6 +327,7 @@ class TelemetryStore:
     def _get_or_create_node(self, node_id: str, domain: Optional[str], timestamp: datetime) -> NodeSnapshot:
         node = self._nodes.get(node_id)
         if node is None:
+            self._prune_nodes_if_needed(incoming_node_id=node_id)
             node = NodeSnapshot(
                 node_id=node_id,
                 domain=domain or "unknown",
@@ -272,11 +340,34 @@ class TelemetryStore:
     def _round_summary_for(self, node_id: str, round_number: Any) -> Optional[NodeRoundSummary]:
         if round_number is None:
             return None
-        round_number = int(round_number)
-        rounds = self._rounds[node_id]
+        round_number = self._coerce_int(round_number, field_name="round")
+        rounds = self._rounds.get(node_id)
+        if rounds is None:
+            rounds = {}
+            self._rounds[node_id] = rounds
         if round_number not in rounds:
+            self._prune_rounds_if_needed(node_id, incoming_round_number=round_number)
             rounds[round_number] = NodeRoundSummary(node_id=node_id, round_number=round_number)
         return rounds[round_number]
+
+    @staticmethod
+    def _is_supported_event_type(event_type: str) -> bool:
+        return event_type in SUPPORTED_TELEMETRY_EVENT_TYPES or event_type.startswith("security.")
+
+    @staticmethod
+    def _require_non_empty_node_id(value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("payload.node_id is required")
+        return value
+
+    @staticmethod
+    def _coerce_int(value: Any, default: Any = 0, field_name: str = "round") -> Any:
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be an integer") from exc
 
     def _touch_edge(
         self,
@@ -294,6 +385,7 @@ class TelemetryStore:
         key = (source_node_id, target_node_id, edge_type)
         edge = self._edges.get(key)
         if edge is None:
+            self._prune_edges_if_needed(incoming_key=key)
             edge = NetworkEdge(
                 source_node_id=source_node_id,
                 target_node_id=target_node_id,
@@ -308,6 +400,53 @@ class TelemetryStore:
         edge.last_round = round_number
         edge.last_weight_summary = dict(weight_summary or edge.last_weight_summary)
         return edge
+
+    def _prune_nodes_if_needed(self, incoming_node_id: Optional[str] = None) -> None:
+        if self.max_nodes <= 0:
+            return
+        while len(self._nodes) >= self.max_nodes:
+            candidates = [node for node in self._nodes.values() if node.node_id != incoming_node_id]
+            if not candidates:
+                break
+            oldest = min(candidates, key=lambda node: (node.last_seen_at or datetime.min, node.node_id))
+            self._drop_node(oldest.node_id)
+
+    def _drop_node(self, node_id: str) -> None:
+        self._nodes.pop(node_id, None)
+        self._events.pop(node_id, None)
+        self._rounds.pop(node_id, None)
+        doomed_edges = [key for key, edge in self._edges.items() if edge.source_node_id == node_id or edge.target_node_id == node_id]
+        for key in doomed_edges:
+            self._edges.pop(key, None)
+
+    def _prune_rounds_if_needed(self, node_id: str, incoming_round_number: Optional[int] = None) -> None:
+        if self.max_rounds_per_node <= 0:
+            return
+        rounds = self._rounds.get(node_id, {})
+        while len(rounds) >= self.max_rounds_per_node:
+            candidates = [rn for rn in rounds if rn != incoming_round_number]
+            if not candidates:
+                break
+            oldest_round = min(candidates)
+            rounds.pop(oldest_round, None)
+
+    def _prune_edges_if_needed(self, incoming_key: Optional[Tuple[str, str, str]] = None) -> None:
+        if self.max_edges <= 0:
+            return
+        while len(self._edges) >= self.max_edges:
+            candidates = [(key, edge) for key, edge in self._edges.items() if key != incoming_key]
+            if not candidates:
+                break
+            oldest_key, _ = min(candidates, key=lambda item: (item[1].last_active_at or datetime.min, item[0]))
+            self._edges.pop(oldest_key, None)
+
+    @staticmethod
+    def _cap_sequence(values: List[Any], limit: int) -> List[Any]:
+        if limit <= 0:
+            return []
+        if len(values) <= limit:
+            return list(values)
+        return list(values[-limit:])
 
     def _sorted_events(self) -> List[NodeEvent]:
         events = [event for node_events in self._events.values() for event in node_events]

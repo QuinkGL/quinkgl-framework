@@ -45,11 +45,9 @@ class TrimmedMean(AggregationStrategy):
         self._validate_updates(updates)
 
         if len(updates) < 3:
-            # Not enough updates to trim, fall back to simple average
-            fedavg = FedAvg()
-            result = await fedavg.aggregate(updates)
-            result.metadata["aggregation_method"] = "trimmed_mean_fallback"
-            return result
+            raise ValueError("TrimmedMean requires at least 3 updates")
+
+        self._get_trim_count(len(updates))
 
         first_weights = updates[0].weights
 
@@ -70,11 +68,19 @@ class TrimmedMean(AggregationStrategy):
             updates=updates
         )
 
+    def _get_trim_count(self, n: int) -> int:
+        k = int(n * self.trim_ratio)
+        if self.trim_ratio > 0 and k == 0:
+            raise ValueError(
+                f"trim_ratio={self.trim_ratio} is too small for n={n}; no values would be trimmed"
+            )
+        return k
+
     def _trim_numpy(self, updates: List[ModelUpdate]) -> np.ndarray:
         """Apply trimmed mean to numpy arrays."""
         weights_matrix = np.stack([u.weights.flatten() for u in updates])
         n = len(updates)
-        k = int(n * self.trim_ratio)
+        k = self._get_trim_count(n)
 
         if k == 0:
             # No trimming, use mean
@@ -110,7 +116,7 @@ class TrimmedMean(AggregationStrategy):
             if values:
                 weights_matrix = np.stack(values)
                 n = len(values)
-                k = int(n * self.trim_ratio)
+                k = self._get_trim_count(n)
 
                 if k == 0:
                     trimmed = np.mean(weights_matrix, axis=0)

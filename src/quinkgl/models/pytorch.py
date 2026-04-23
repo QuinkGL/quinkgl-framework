@@ -113,11 +113,13 @@ class PyTorchModel(ModelWrapper):
 
             state_dict[name] = tensor
 
-        # Ensure all model parameters are covered (use existing for missing ones)
-        for name in expected_state_dict:
-            if name not in state_dict:
-                logger.warning(f"Missing weights for '{name}', using existing values")
-                state_dict[name] = expected_state_dict[name]
+        # Ensure all model parameters are covered
+        missing_keys = [name for name in expected_state_dict if name not in state_dict]
+        if missing_keys:
+            raise ValueError(
+                f"Missing weights for parameters: {missing_keys}. "
+                f"This may indicate a serialization bug or model version mismatch."
+            )
 
         # Load validated state dict
         try:
@@ -245,7 +247,13 @@ class PyTorchModel(ModelWrapper):
             avg_acc = epoch_correct / epoch_total if epoch_total > 0 else 0.0
 
             if config.verbose:
-                print(f"Epoch {epoch + 1}/{config.epochs}: Loss={avg_loss:.4f}, Acc={avg_acc:.4f}")
+                logger.info(
+                    "Epoch %s/%s: Loss=%.4f, Acc=%.4f",
+                    epoch + 1,
+                    config.epochs,
+                    avg_loss,
+                    avg_acc,
+                )
 
             total_loss = avg_loss
             correct = epoch_correct

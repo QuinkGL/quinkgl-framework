@@ -1,7 +1,11 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+import logging
 from typing import Any, Callable, Dict, List, Set
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -17,6 +21,9 @@ def _copy_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Each delivery gets its own deep-copied snapshot so subscribers can
     # inspect ordinary dict/list payloads without mutating shared state.
     return _snapshot_value(payload, set())
+
+
+_UNREPR_FALLBACK = "<unrepresentable_value>"
 
 
 def _snapshot_value(value: Any, active: Set[int]) -> Any:
@@ -43,7 +50,14 @@ def _snapshot_value(value: Any, active: Set[int]) -> Any:
     try:
         return deepcopy(value)
     except Exception:
-        return repr(value)
+        # Preserve the value's own ``repr`` so observers (terminal UI,
+        # telemetry sink, debugger) get a human-readable breadcrumb rather
+        # than a generic sentinel — this is the contract the public test
+        # in ``tests/observability/test_terminal_events.py`` pins down.
+        try:
+            return repr(value)
+        except Exception:
+            return _UNREPR_FALLBACK
 
 
 class EventEmitter:
@@ -66,13 +80,25 @@ class EventEmitter:
         )
         for callback in list(self._subscribers):
             try:
+                callback_payload = _copy_payload(snapshot) if getattr(callback, "needs_isolated_payload", False) else snapshot
                 callback(
                     RuntimeEvent(
                         event_type=event_type,
-                        payload=_copy_payload(snapshot),
+                        payload=callback_payload,
                         timestamp=timestamp,
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                logger.exception("Event subscriber failed while handling %s", event_type)
+                if event_type != "subscriber.error":
+                    self.emit(
+                        "subscriber.error",
+                        {
+                            "source_event_type": event_type,
+                            "subscriber": getattr(callback, "__name__", repr(callback)),
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
                 continue
         return event

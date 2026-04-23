@@ -1,0 +1,32 @@
+<!-- Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0 -->
+
+# {project_name}
+
+PyTorch-Tabular peer scaffolded by QuinkGL v{quinkgl_version}.
+
+## Running the Peer
+
+Install dependencies and run the canonical Mode-C peer script:
+
+```bash
+pip install -e .
+python peer_main.py
+```
+
+`peer_main.py` loads `{manifest_filename}`, constructs a `GossipNode`, and starts training.
+
+## Testing
+
+Run the test suite with pytest:
+
+```bash
+pytest
+```
+
+- `test_build_model.py` – verifies `build_model` raises `NotImplementedError` (stub).
+- `test_build_loaders.py` – verifies `build_loaders` raises `NotImplementedError` (stub).
+- `test_integration.py` – placeholder integration test.
+
+## Filling In
+
+Open `peer_script.py` and replace the stub `build_model` and `build_loaders` functions with your tabular model and data loaders.

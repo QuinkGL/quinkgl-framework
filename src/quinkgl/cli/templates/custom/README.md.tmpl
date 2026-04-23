@@ -1,0 +1,28 @@
+<!-- Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0 -->
+# {project_name}
+
+Custom QuinkGL peer generated from the `{template}` template.
+
+## Running the Peer
+
+```bash
+python peer_main.py --swarm-id {swarm_id_short}
+```
+
+The canonical Mode C entry point (`peer_main.py`) loads the manifest,
+constructs a `GossipNode`, and runs the training loop.
+
+## Testing
+
+```bash
+pytest
+```
+
+Tests verify that `build_model` and `build_loaders` raise `NotImplementedError`
+(as expected for a custom template) and that the local swarm fixture works.
+
+## Project Info
+
+- QuinkGL version: {quinkgl_version}
+- Spec version: {spec_version}
+- Created at: {created_at}

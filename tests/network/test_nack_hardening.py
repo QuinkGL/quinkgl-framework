@@ -34,6 +34,7 @@ def _make_community():
     community._nack_buckets = {}
     community.node_id = "local"
     community.data_schema_hash = "abc"
+    community.event_emitter = MagicMock()
     # mock my_peer.key for chunk signing in NACK resend path
     community.my_peer = MagicMock()
     community.my_peer.key.signature = MagicMock(return_value=b"\x00" * 64)
@@ -138,6 +139,22 @@ class TestTokenBucketRateLimit:
 
         # Next one must fail
         assert community._nack_try_consume(mid) is False
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_nack_emits_security_event(self):
+        community = _make_community()
+        mid = "ab" * 20
+        _seed_transfer(community, "t-rate", weights_len=CHUNK_SIZE * 2, recipient_mid=mid)
+        peer = _make_peer(mid)
+
+        for _ in range(NACK_BUCKET_MAX_TOKENS):
+            assert community._nack_try_consume(mid) is True
+
+        payload = _nack_payload("t-rate", "node-rate", [0])
+        await GossipLearningCommunity.on_request_chunks.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.nack_rate_limited", "ipv8_payload_dropped"]
 
 
 class TestMalformedPayload:

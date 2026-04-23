@@ -1,0 +1,7 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Integration / smoke tests."""
+
+
+def test_fixture_available(fake_swarm):
+    """Smoke-test that the fake_swarm fixture loads correctly."""
+    assert fake_swarm is not None

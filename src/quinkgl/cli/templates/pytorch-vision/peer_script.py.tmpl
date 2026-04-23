@@ -1,0 +1,83 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Peer script: model and data-loader builders.
+
+Generated for swarm {swarm_id_short} on {created_at}.
+Architecture hash: {arch_hash}
+Input shape: {input_shape}  Output shape: {output_shape}
+"""
+
+
+def build_model(manifest, **script_args):
+    """Build and return the model for this peer.
+
+    Args:
+        manifest: The SwarmManifest instance.
+        **script_args: Extra keyword arguments from the manifest script section.
+
+    Raises:
+        NotImplementedError: Until the peer implements its model.
+    """
+    # Example (torchvision image classification):
+    #
+    #   import torchvision.models as models
+    #   model = models.resnet18(num_classes={output_shape}[-1])
+    #   return model
+    #
+    # Or a custom small CNN:
+    #
+    #   import torch.nn as nn
+    #   class SmallCNN(nn.Module):
+    #       def __init__(self, num_classes):
+    #           super().__init__()
+    #           self.features = nn.Sequential(
+    #               nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+    #               nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+    #               nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+    #           )
+    #           self.classifier = nn.Linear(128, num_classes)
+    #       def forward(self, x):
+    #           x = self.features(x)
+    #           x = x.view(x.size(0), -1)
+    #           return self.classifier(x)
+    #   return SmallCNN(num_classes={output_shape}[-1])
+    raise NotImplementedError(
+        "build_model() is not yet implemented. "
+        "Define your architecture here for manifest '{manifest_name}'."
+    )
+
+
+def build_loaders(manifest, **script_args):
+    """Build and return the train and validation data loaders.
+
+    Args:
+        manifest: The SwarmManifest instance.
+        **script_args: Extra keyword arguments from the manifest script section.
+
+    Raises:
+        NotImplementedError: Until the peer implements its loaders.
+    """
+    # Example (torchvision datasets + transforms):
+    #
+    #   from torchvision import datasets, transforms
+    #   from torch.utils.data import DataLoader
+    #
+    #   transform = transforms.Compose([
+    #       transforms.Resize(256),
+    #       transforms.CenterCrop(224),
+    #       transforms.ToTensor(),
+    #       transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                            std=[0.229, 0.224, 0.225]),
+    #   ])
+    #
+    #   train_ds = datasets.CIFAR10(root="./data", train=True,
+    #                               download=True, transform=transform)
+    #   val_ds   = datasets.CIFAR10(root="./data", train=False,
+    #                               download=True, transform=transform)
+    #
+    #   train_loader = DataLoader(train_ds, batch_size=32, shuffle=True,  num_workers=2)
+    #   val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False, num_workers=2)
+    #   return train_loader, val_loader
+    raise NotImplementedError(
+        "build_loaders() is not yet implemented. "
+        "Define your dataset / dataloader logic here for manifest '{manifest_name}'."
+    )

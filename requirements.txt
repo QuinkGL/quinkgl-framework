@@ -6,23 +6,23 @@
 # For all extras: pip install -e ".[all]"
 
 # Core numerical computing
-numpy>=2.4.1
+numpy>=1.26,<3
 
 # Deep learning
-torch>=2.10.0
-torchvision>=0.25.0
+torch>=2.1,<3
+torchvision>=0.16,<1
 
 # Data handling
-scikit-learn>=1.8.0
-pandas>=3.0.0
+scikit-learn>=1.4,<2
+pandas>=2.0,<3
 
 # P2P networking
-pyipv8>=3.1.0
+pyipv8>=3.0,<4
 
 # gRPC for communication
-grpcio>=1.76.0
-grpcio-tools>=1.76.0
-protobuf>=6.33.4
+grpcio>=1.62,<2
+grpcio-tools>=1.62,<2
+protobuf>=6.31,<7
 
 # Safe serialization (replaces pickle for security)
 msgpack>=1.1.2

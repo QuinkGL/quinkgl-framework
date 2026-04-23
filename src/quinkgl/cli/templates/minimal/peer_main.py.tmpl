@@ -1,0 +1,28 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Canonical Mode C peer main (§10.5.2).
+
+Generated for swarm {swarm_id_short} on {created_at}.
+Manifest: {manifest_filename}
+"""
+import asyncio
+
+from quinkgl.manifest import SwarmManifest
+from quinkgl.node import GossipNode
+
+
+async def main():
+    manifest = SwarmManifest.from_file("{manifest_filename}")
+    node = GossipNode(manifest)
+    try:
+        await node.start()
+        await node.train(
+            build_model=build_model,
+            build_loaders=build_loaders,
+        )
+    finally:
+        await node.stop()
+
+
+if __name__ == "__main__":
+    from peer_script import build_model, build_loaders
+    asyncio.run(main())

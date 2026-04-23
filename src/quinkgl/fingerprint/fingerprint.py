@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 
 _BUCKET_ORDER = {"low": 0, "medium": 1, "high": 2}
-FINGERPRINT_SCHEMA_VERSION = 1
+FINGERPRINT_SCHEMA_VERSION = 2
 
 # Supported differential-privacy noise mechanisms for feature/gradient moments.
 NOISE_MECHANISM_GAUSSIAN = "gaussian"
@@ -127,6 +127,7 @@ class FingerprintPrivacyConfig:
     )
     gradient_enabled: bool = False
     gradient_noise_sigma: float = 0.05
+    gradient_clip_norm: float = 5.0
     gradient_dp_epsilon: Optional[float] = None
     gradient_dp_delta: float = 1e-5
     gradient_sensitivity: Optional[float] = None
@@ -233,6 +234,7 @@ class DataFingerprint:
     # set to 0 ("unrevealed") by ``FingerprintComputer`` when privacy
     # defaults are active (see audit F4).
     class_count_bucket: str = "unknown"
+    round_nonce: Optional[str] = None
 
     def affinity_score(
         self,
@@ -335,6 +337,7 @@ class DataFingerprint:
             "sample_bucket": self.sample_bucket,
             "num_classes": self.num_classes,
             "class_count_bucket": self.class_count_bucket,
+            "round_nonce": self.round_nonce,
         }
         if self.gradient_moments:
             d["gradient_moments"] = {
@@ -352,6 +355,7 @@ class DataFingerprint:
             "sample_bucket",
             "num_classes",
             "class_count_bucket",
+            "round_nonce",
         }
         optional = {"gradient_moments"}
         _check_payload_keys(data, required, optional, "DataFingerprint")
@@ -402,12 +406,15 @@ class DataFingerprint:
         sample_bucket = data["sample_bucket"]
         class_count_bucket = data["class_count_bucket"]
         num_classes = data["num_classes"]
+        round_nonce = data["round_nonce"]
         if not isinstance(sample_bucket, str) or not sample_bucket:
             raise ValueError("DataFingerprint.sample_bucket must be a non-empty string")
         if not isinstance(class_count_bucket, str) or not class_count_bucket:
             raise ValueError("DataFingerprint.class_count_bucket must be a non-empty string")
         if not isinstance(num_classes, int) or num_classes < 0:
             raise ValueError(f"DataFingerprint.num_classes must be >= 0, got {num_classes}")
+        if round_nonce is not None and (not isinstance(round_nonce, str) or not round_nonce):
+            raise ValueError("DataFingerprint.round_nonce must be None or a non-empty string")
         return cls(
             schema_version=data["schema_version"],
             label_buckets=label_buckets,
@@ -416,4 +423,5 @@ class DataFingerprint:
             num_classes=num_classes,
             gradient_moments=grad_moments,
             class_count_bucket=class_count_bucket,
+            round_nonce=round_nonce,
         )

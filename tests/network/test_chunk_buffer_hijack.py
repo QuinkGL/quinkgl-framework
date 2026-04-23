@@ -36,6 +36,7 @@ def _make_community():
     community.on_model_update_callback = None
     community._last_seen_round = {}
     community._mid_to_node_id = {}
+    community.require_signature = False
     return community
 
 

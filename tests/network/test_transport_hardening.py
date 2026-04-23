@@ -22,8 +22,12 @@ from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
     DiscoveryAnnouncePayload,
     ModelUpdatePayload,
+    ModelChunkPayload,
     MAX_FINGERPRINT_BYTES,
+    MAX_INCOMING_MESSAGE_SIZE,
+    MAX_ROUND_SKIP,
 )
+from quinkgl.network.model_serializer import serialize_model
 
 
 # ── §4.9: SHA-256 truncated ─────────────────────────────────
@@ -182,10 +186,13 @@ class TestIdentityBinding:
         community._last_seen_round = {}
         community._chunk_buffers = {}
         community.known_peers = {}
+        community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
         community.node_id = "local"
         community.data_schema_hash = "abc"
         community.on_model_update_callback = None
+        community.require_signature = False
+        community.event_emitter = None
 
         peer = MagicMock()
         peer.mid = b"\xcc" * 20
@@ -222,6 +229,8 @@ class TestIdentityBinding:
         community.node_id = "local"
         community.data_schema_hash = "abc"
         community.on_model_update_callback = None
+        community.require_signature = False
+        community.event_emitter = None
 
         peer = MagicMock()
         peer.mid = b"\xdd" * 20
@@ -232,7 +241,7 @@ class TestIdentityBinding:
 
         payload = ModelUpdatePayload(
             sender_id="node-d",
-            weights_bytes=b"\x00" * 16,
+            weights_bytes=serialize_model({"w": [1.0, 2.0]}),
             sample_count=8,
             round_number=1,
             data_schema_hash="abc",
@@ -244,6 +253,271 @@ class TestIdentityBinding:
 
         # Should have advanced last_seen_round
         assert community._last_seen_round.get(pmid) == 1
+
+
+class TestRequireSignaturePolicy:
+    @pytest.mark.asyncio
+    async def test_unsigned_direct_model_rejected_by_default(self):
+        community = MagicMock(spec=GossipLearningCommunity)
+        community._last_seen_round = {}
+        community._chunk_buffers = {}
+        community.known_peers = {}
+        community._mid_to_node_id = {}
+        community._heartbeat_sequence = 0
+        community.node_id = "local"
+        community.data_schema_hash = "abc"
+        community.on_model_update_callback = None
+        community.require_signature = True
+        community.event_emitter = MagicMock()
+
+        peer = MagicMock()
+        peer.mid = b"\xee" * 20
+        peer.public_key = MagicMock()
+
+        payload = ModelUpdatePayload(
+            sender_id="node-z",
+            weights_bytes=b"\x00" * 16,
+            sample_count=8,
+            round_number=1,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        assert community._last_seen_round == {}
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.signature_missing", "ipv8_payload_dropped"]
+        drop_payload = community.event_emitter.emit.call_args_list[-1].args[1]
+        assert drop_payload["reason"] == "missing signature"
+        assert drop_payload["transport"] == "direct"
+
+    @pytest.mark.asyncio
+    async def test_unsigned_chunk_rejected_by_default(self):
+        community = MagicMock(spec=GossipLearningCommunity)
+        community._last_seen_round = {}
+        community._chunk_buffers = {}
+        community.known_peers = {}
+        community._mid_to_node_id = {}
+        community._heartbeat_sequence = 0
+        community.node_id = "local"
+        community.data_schema_hash = "abc"
+        community.on_model_update_callback = None
+        community.require_signature = True
+        community.event_emitter = MagicMock()
+
+        peer = MagicMock()
+        peer.mid = b"\xef" * 20
+        peer.public_key = MagicMock()
+
+        payload = ModelChunkPayload(
+            transfer_id="tid-1",
+            chunk_index=0,
+            total_chunks=2,
+            sender_id="node-z",
+            data_schema_hash="abc",
+            round_number=1,
+            sample_count=8,
+            loss=0.0,
+            accuracy=0.0,
+            chunk_data=b"\x00" * 10,
+        )
+
+        await GossipLearningCommunity.on_model_chunk.__wrapped__(community, peer, payload)
+
+        assert community._chunk_buffers == {}
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.signature_missing", "ipv8_payload_dropped"]
+        drop_payload = community.event_emitter.emit.call_args_list[-1].args[1]
+        assert drop_payload["reason"] == "missing signature"
+        assert drop_payload["transport"] == "chunk"
+
+    @pytest.mark.asyncio
+    async def test_unsigned_direct_model_allowed_with_explicit_opt_out(self):
+        community = MagicMock(spec=GossipLearningCommunity)
+        community._last_seen_round = {}
+        community._chunk_buffers = {}
+        community.known_peers = {}
+        community._mid_to_node_id = {}
+        community._heartbeat_sequence = 0
+        community.node_id = "local"
+        community.data_schema_hash = "abc"
+        community.on_model_update_callback = None
+        community.require_signature = False
+        community.event_emitter = MagicMock()
+
+        peer = MagicMock()
+        peer.mid = b"\xf0" * 20
+        peer.public_key = MagicMock()
+        pmid = peer.mid.hex()
+
+        payload = ModelUpdatePayload(
+            sender_id="node-optout",
+            weights_bytes=serialize_model({"w": [1.0, 2.0]}),
+            sample_count=8,
+            round_number=3,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        assert community._last_seen_round.get(pmid) == 3
+        community.event_emitter.emit.assert_not_called()
+
+
+class TestIPv8SecurityEvents:
+    def _community(self):
+        community = MagicMock(spec=GossipLearningCommunity)
+        community._last_seen_round = {}
+        community._chunk_buffers = {}
+        community.known_peers = {}
+        community._mid_to_node_id = {}
+        community._heartbeat_sequence = 0
+        community.node_id = "local"
+        community.data_schema_hash = "abc"
+        community.on_model_update_callback = None
+        community.require_signature = False
+        community.event_emitter = MagicMock()
+        community.max_round_skip = MAX_ROUND_SKIP
+        community.current_round_provider = lambda: 0
+        community.last_seen_round_state_path = ""
+        community._load_last_seen_round_state = GossipLearningCommunity._load_last_seen_round_state.__get__(community)
+        community._persist_last_seen_round_state = GossipLearningCommunity._persist_last_seen_round_state.__get__(community)
+        community._record_last_seen_round = GossipLearningCommunity._record_last_seen_round.__get__(community)
+        community._get_local_round = GossipLearningCommunity._get_local_round.__get__(community)
+        return community
+
+    @pytest.mark.asyncio
+    async def test_identity_mismatch_emits_security_event(self):
+        community = self._community()
+        peer = MagicMock()
+        peer.mid = b"\xa1" * 20
+        peer.public_key = MagicMock()
+        pmid = peer.mid.hex()
+        community._mid_to_node_id[pmid] = "real-node"
+
+        payload = ModelUpdatePayload(
+            sender_id="fake-node",
+            weights_bytes=b"\x00" * 16,
+            sample_count=8,
+            round_number=1,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.identity_mismatch", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_emits_security_event(self):
+        community = self._community()
+        peer = MagicMock()
+        peer.mid = b"\xa2" * 20
+        peer.public_key = MagicMock()
+        peer.public_key.verify.return_value = False
+
+        payload = ModelUpdatePayload(
+            sender_id="node-bad-sig",
+            weights_bytes=b"\x00" * 16,
+            sample_count=8,
+            round_number=1,
+            data_schema_hash="abc",
+            signature=b"bad",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.signature_rejected", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_replay_rejected_emits_security_event(self):
+        community = self._community()
+        peer = MagicMock()
+        peer.mid = b"\xa3" * 20
+        peer.public_key = MagicMock()
+        community._last_seen_round[peer.mid.hex()] = 5
+
+        payload = ModelUpdatePayload(
+            sender_id="node-replay",
+            weights_bytes=b"\x00" * 16,
+            sample_count=8,
+            round_number=5,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.replay_rejected", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_future_round_rejected_emits_security_event(self):
+        community = self._community()
+        community.current_round_provider = lambda: 4
+        peer = MagicMock()
+        peer.mid = b"\xa4" * 20
+        peer.public_key = MagicMock()
+
+        payload = ModelUpdatePayload(
+            sender_id="node-future",
+            weights_bytes=b"\x00" * 16,
+            sample_count=8,
+            round_number=MAX_ROUND_SKIP + 5,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.future_round_rejected", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_oversized_direct_model_emits_security_event(self):
+        community = self._community()
+        peer = MagicMock()
+        peer.mid = b"\xa5" * 20
+        peer.public_key = MagicMock()
+
+        payload = ModelUpdatePayload(
+            sender_id="node-big",
+            weights_bytes=b"\x00" * (MAX_INCOMING_MESSAGE_SIZE + 1),
+            sample_count=8,
+            round_number=1,
+            data_schema_hash="abc",
+        )
+
+        await GossipLearningCommunity.on_model_update.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.oversized_message", "ipv8_payload_dropped"]
+
+    @pytest.mark.asyncio
+    async def test_chunk_invalid_signature_emits_security_event(self):
+        community = self._community()
+        peer = MagicMock()
+        peer.mid = b"\xa6" * 20
+        peer.public_key = MagicMock()
+        peer.public_key.verify.return_value = False
+
+        payload = ModelChunkPayload(
+            transfer_id="tid-bad-sig",
+            chunk_index=0,
+            total_chunks=1,
+            sender_id="node-bad-sig",
+            data_schema_hash="abc",
+            round_number=1,
+            sample_count=8,
+            loss=0.0,
+            accuracy=0.0,
+            chunk_data=b"\x00" * 10,
+            signature=b"bad",
+        )
+
+        await GossipLearningCommunity.on_model_chunk.__wrapped__(community, peer, payload)
+
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted == ["security.signature_rejected", "ipv8_payload_dropped"]
 
 
 # ── B14 direct-path: ModelUpdatePayload signature field ──────

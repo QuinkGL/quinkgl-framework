@@ -313,8 +313,5 @@ class CyclonTopology(TopologyStrategy):
 
         logger.info("Cyclon shuffle task stopped")
 
-    def __del__(self):
-        """Cleanup when object is destroyed."""
-        if hasattr(self, '_running') and self._running:
-            if self._shuffle_task and not self._shuffle_task.done():
-                self._shuffle_task.cancel()
+    # TOP-09: Removed unsafe __del__ method - use explicit stop() instead
+    # __del__ is unsafe for asyncio task cancellation

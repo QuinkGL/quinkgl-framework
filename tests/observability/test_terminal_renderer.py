@@ -108,18 +108,23 @@ def test_format_runtime_event_renders_aggregation_with_peer_count():
 
 def test_format_runtime_event_handles_unknown_events_sensibly():
     event = RuntimeEvent(
-        event_type="custom_debug",
+        event_type="telemetry.delivery_failed",
         payload={
             "node_id": "alice",
             "round": 4,
-            "message": "hello",
-            "peer_ids": ["bob"],
+            "kind": "event",
+            "error": "service unavailable",
+            "base_url": "http://telemetry.local",
+            "token": "secret-123",
         },
     )
 
     rendered = format_runtime_event(event)
 
-    assert rendered == "[NODE alice][ROUND 4] custom_debug message=hello peer_ids=bob"
+    assert "kind=event" in rendered
+    assert "error=service unavailable" in rendered
+    assert "base_url=http://telemetry.local" in rendered
+    assert "token=<redacted:token>" in rendered
 
 
 def test_terminal_observer_delegates_to_printer_callable():

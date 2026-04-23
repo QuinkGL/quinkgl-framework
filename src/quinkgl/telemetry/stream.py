@@ -5,6 +5,9 @@ from contextlib import suppress
 from typing import Any, Dict, Set
 
 
+STREAM_CLOSE_CODE_QUEUE_FULL = 1013
+
+
 class TelemetryStreamHub:
     """Simple queue-based fan-out for live telemetry updates."""
 
@@ -17,6 +20,17 @@ class TelemetryStreamHub:
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
+                with suppress(asyncio.QueueEmpty):
+                    while True:
+                        queue.get_nowait()
+                with suppress(asyncio.QueueFull):
+                    queue.put_nowait(
+                        {
+                            "type": "stream_closed",
+                            "code": STREAM_CLOSE_CODE_QUEUE_FULL,
+                            "reason": "Telemetry subscriber queue overflow",
+                        }
+                    )
                 dead.append(queue)
         for queue in dead:
             self._subscribers.discard(queue)

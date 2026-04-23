@@ -40,6 +40,16 @@ class _DummyModel(ModelWrapper):
         return {"loss": 0.25, "accuracy": 0.75}
 
 
+class _BlockingModel(_DummyModel):
+    def __init__(self, gate: asyncio.Event):
+        super().__init__()
+        self._gate = gate
+
+    async def train(self, data, config=None):
+        await self._gate.wait()
+        return await super().train(data, config=config)
+
+
 class _SlowAggregator(AggregationStrategy):
     """Aggregator that sleeps to simulate a slow merge, allowing concurrent appends."""
 
@@ -82,6 +92,22 @@ def _make_aggregator(aggregator=None, stale_round_tolerance=2):
         domain="test",
         data_schema_hash="abc",
         model=_DummyModel(),
+        topology=_DummyTopology(),
+        aggregator=aggregator or _InstantAggregator(),
+        training_config=TrainingConfig(),
+        stale_round_tolerance=stale_round_tolerance,
+    )
+    agg.running = True
+    agg.current_round = 10
+    return agg
+
+
+def _make_aggregator_with_model(model, aggregator=None, stale_round_tolerance=2):
+    agg = ModelAggregator(
+        peer_id="n1",
+        domain="test",
+        data_schema_hash="abc",
+        model=model,
         topology=_DummyTopology(),
         aggregator=aggregator or _InstantAggregator(),
         training_config=TrainingConfig(),
@@ -189,6 +215,38 @@ async def test_reentrant_aggregation_is_skipped():
 
     assert result is None
     await task1
+
+
+@pytest.mark.asyncio
+async def test_pending_update_queue_applies_backpressure_when_full():
+    agg = _make_aggregator()
+    agg.max_pending_updates = 1
+
+    await agg._handle_model_update(_make_update_msg("peer-a", 10))
+    await agg._handle_model_update(_make_update_msg("peer-b", 10))
+
+    assert len(agg.pending_updates) == 1
+    assert agg.pending_updates[0].peer_id == "peer-a"
+
+
+@pytest.mark.asyncio
+async def test_model_snapshot_waits_for_inflight_training_under_model_lock():
+    gate = asyncio.Event()
+    agg = _make_aggregator_with_model(_BlockingModel(gate))
+
+    train_task = asyncio.create_task(agg._train_local(data=[1]))
+    await asyncio.sleep(0)
+
+    snapshot_task = asyncio.create_task(agg.get_model_weights_snapshot())
+    await asyncio.sleep(0.05)
+    assert snapshot_task.done() is False
+
+    gate.set()
+    await train_task
+    snapshot = await snapshot_task
+
+    assert snapshot is not None
+    assert "w" in snapshot
 
 
 @pytest.mark.asyncio

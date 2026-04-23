@@ -20,22 +20,59 @@ from quinkgl.fingerprint.fingerprint import (
 )
 
 
+class PrivacyBudgetTracker:
+    """Tracks DP epsilon/delta budget consumption for fingerprint broadcasting.
+
+    FP-01: Privacy accounting for feature-moment noise.
+    """
+
+    def __init__(self, total_epsilon: Optional[float] = None, total_delta: float = 1e-5):
+        self.total_epsilon = total_epsilon
+        self.total_delta = total_delta
+        self.consumed_epsilon = 0.0
+        self.consumed_delta = 0.0
+        self.query_count = 0
+
+    def consume(self, epsilon: float, delta: float = 0.0) -> bool:
+        """Consume privacy budget. Returns True if budget available."""
+        if self.total_epsilon is not None and (self.consumed_epsilon + epsilon) > self.total_epsilon:
+            return False
+        if self.consumed_delta + delta > self.total_delta:
+            return False
+        self.consumed_epsilon += epsilon
+        self.consumed_delta += delta
+        self.query_count += 1
+        return True
+
+    def remaining_epsilon(self) -> Optional[float]:
+        if self.total_epsilon is None:
+            return None
+        return max(0.0, self.total_epsilon - self.consumed_epsilon)
+
+
 class FingerprintComputer:
     """Computes DataFingerprint from local data and model."""
 
     def __init__(self, privacy_config: Optional[FingerprintPrivacyConfig] = None):
         self.privacy = privacy_config or FingerprintPrivacyConfig()
+        # FP-01: Privacy budget tracker for DP accounting
+        self._budget_tracker = PrivacyBudgetTracker(
+            total_epsilon=self.privacy.feature_dp_epsilon,
+            total_delta=self.privacy.feature_dp_delta
+        )
 
     def compute_from_label_counts(
         self,
         label_counts: Dict[str, int],
         feature_moments: Optional[Dict[str, Tuple[float, float]]] = None,
         gradient_moments: Optional[Dict[str, Tuple[float, float]]] = None,
+        round_number: Optional[int] = None,
     ) -> DataFingerprint:
         total_samples = sum(label_counts.values())
         total = total_samples or 1
         raw_proportions = {k: v / total for k, v in label_counts.items()}
         raw_buckets = self._quantize_labels(raw_proportions)
+        round_nonce = self._derive_round_nonce(round_number)
 
         num_classes = len(label_counts)
         class_count_bucket = self._bucket_class_count(num_classes)
@@ -47,7 +84,7 @@ class FingerprintComputer:
             label_buckets: Dict[str, str] = {}
             revealed_num_classes = 0
         else:
-            label_buckets = self._maybe_hash_label_keys(raw_buckets)
+            label_buckets = self._maybe_hash_label_keys(raw_buckets, round_nonce)
             # When hashing is active, the raw integer class count is also
             # suppressed; downstream consumers should use class_count_bucket.
             revealed_num_classes = (
@@ -71,7 +108,23 @@ class FingerprintComputer:
             num_classes=revealed_num_classes,
             gradient_moments=grad_moments,
             class_count_bucket=class_count_bucket,
+            round_nonce=round_nonce,
         )
+
+    def _derive_round_nonce(self, round_number: Optional[int]) -> Optional[str]:
+        """Derive a stable per-round nonce string.
+
+        The nonce is not intended to be secret; it exists to bind a
+        fingerprint instance to a given round so cross-round correlation is
+        harder and hash-based label keys can rotate.  Returning ``None`` for
+        legacy/no-round calls preserves backwards compatibility.
+        """
+        if round_number is None:
+            return None
+        if not isinstance(round_number, int) or round_number < 0:
+            raise ValueError(f"round_number must be a non-negative int, got {round_number}")
+        material = f"quinkgl-fingerprint-round:{round_number}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()[:16]
 
     def _bucket_class_count(self, count: int) -> str:
         for bucket_name, low, high in self.privacy.class_count_buckets:
@@ -80,16 +133,18 @@ class FingerprintComputer:
         # Count exceeds every configured bucket → fall back to the last one.
         return self.privacy.class_count_buckets[-1][0]
 
-    def _hash_label_key(self, label: str) -> str:
+    def _hash_label_key(self, label: str, round_nonce: Optional[str] = None) -> str:
         """Stable obfuscation of a raw label name.
 
         Uses HMAC-SHA256 when ``label_key_secret`` is configured, otherwise
         plain SHA-256.  The result is truncated to ``label_key_hash_length``
         hex characters.  Peers that share the same secret (or no secret)
-        produce identical hashes for identical labels, so affinity matching
-        continues to work.
+        produce identical hashes for identical labels.  When ``round_nonce``
+        is provided, it is mixed into the digest input so label keys rotate
+        across rounds and become harder to link longitudinally.
         """
-        raw = label.encode("utf-8")
+        nonce_prefix = f"{round_nonce}:" if round_nonce is not None else ""
+        raw = f"{nonce_prefix}{label}".encode("utf-8")
         if self.privacy.label_key_secret is not None:
             digest = hmac.new(
                 self.privacy.label_key_secret, raw, hashlib.sha256
@@ -99,12 +154,16 @@ class FingerprintComputer:
         length = max(1, int(self.privacy.label_key_hash_length))
         return digest[:length]
 
-    def _maybe_hash_label_keys(self, buckets: Dict[str, str]) -> Dict[str, str]:
+    def _maybe_hash_label_keys(
+        self,
+        buckets: Dict[str, str],
+        round_nonce: Optional[str] = None,
+    ) -> Dict[str, str]:
         if not self.privacy.hash_label_keys:
             return dict(buckets)
         hashed: Dict[str, str] = {}
         for label, bucket in buckets.items():
-            hashed[self._hash_label_key(label)] = bucket
+            hashed[self._hash_label_key(label, round_nonce)] = bucket
         return hashed
 
     def _quantize_labels(self, proportions: Dict[str, float]) -> Dict[str, str]:
@@ -123,6 +182,15 @@ class FingerprintComputer:
     def _sample_noise(self, mechanism: str, scale: float) -> float:
         """Sample a fresh noise value per call.
 
+        # FP-01: Consume privacy budget for gradient moments if DP epsilon is configured
+        if self.privacy.gradient_dp_epsilon is not None:
+            num_moments = len(moments)
+            epsilon_per_moment = self.privacy.gradient_dp_epsilon / max(1, num_moments)
+            if not self._budget_tracker.consume(epsilon_per_moment, self.privacy.gradient_dp_delta):
+                # Budget exhausted, skip noise addition
+                return {k: (float(np.clip(mean, -clip, clip)), max(0.0, float(np.clip(var, -clip, clip)))) for k, (mean, var) in moments.items()}
+
+
         Privacy invariant: noise MUST be sampled per-query, never cached,
         to prevent averaging-attack de-noising across repeated fingerprints.
         """
@@ -140,6 +208,16 @@ class FingerprintComputer:
         mech = self.privacy.feature_noise_mechanism
         clip = self.privacy.feature_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
+
+        # FP-01: Consume privacy budget if DP epsilon is configured
+        if self.privacy.feature_dp_epsilon is not None:
+            # Approximate epsilon consumption per query (per moment)
+            num_moments = len(moments)
+            epsilon_per_moment = self.privacy.feature_dp_epsilon / max(1, num_moments)
+            if not self._budget_tracker.consume(epsilon_per_moment, self.privacy.feature_dp_delta):
+                # Budget exhausted, skip noise addition
+                return {k: (float(np.clip(mean, -clip, clip)), max(0.0, float(np.clip(var, -clip, clip)))) for k, (mean, var) in moments.items()}
+
         for key, (mean, var) in moments.items():
             m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
             v = max(
@@ -154,11 +232,13 @@ class FingerprintComputer:
     ) -> Dict[str, Tuple[float, float]]:
         scale = self.privacy.effective_gradient_noise_scale()
         mech = self.privacy.gradient_noise_mechanism
+        # FP-04: Add gradient clipping to prevent extreme values
+        clip = self.privacy.gradient_clip_norm
         noised: Dict[str, Tuple[float, float]] = {}
         for key, (mean, var) in moments.items():
-            m = mean + self._sample_noise(mech, scale)
-            v = max(0.0, var + self._sample_noise(mech, scale))
-            noised[key] = (float(m), float(v))
+            m = float(np.clip(mean, -clip, clip)) + self._sample_noise(mech, scale)
+            v = max(0.0, float(np.clip(var, -clip, clip)) + self._sample_noise(mech, scale))
+            noised[key] = (m, v)
         return noised
 
     def _bucket_sample_count(self, count: int) -> str:

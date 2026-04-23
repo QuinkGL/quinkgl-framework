@@ -1,0 +1,11 @@
+# Conforms to SWARM_ARCHITECTURE_SPEC.md v2.0.0
+"""Shared test fixtures for {project_name}."""
+import pytest_asyncio
+
+from quinkgl.testing import local_swarm_fixture
+
+
+@pytest_asyncio.fixture
+async def fake_swarm():
+    async with local_swarm_fixture() as sw:
+        yield sw

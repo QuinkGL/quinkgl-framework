@@ -3,6 +3,37 @@ from typing import Any, Callable, Iterable, List
 from quinkgl.observability.events import RuntimeEvent
 
 
+FALLBACK_PAYLOAD_ALLOWLIST = {
+    "aggregation_failed": {"error", "error_type", "peer_ids", "pending_updates_restored"},
+    "consensus_reached": {"agreeing_peers", "agreement_ratio", "mean_accuracy", "mean_loss", "total_peers"},
+    "early_stopping": {"best_accuracy", "best_loss", "rounds_without_improvement", "status"},
+    "ipv8_payload_dropped": {"error", "error_type", "message_type", "peer_id", "reason", "security_event", "sender_id"},
+    "model_rejected_backpressure": {"max_pending_updates", "peer_id", "queue_depth"},
+    "model_rejected_stale": {"local_round", "peer_id", "sender_round", "tolerance"},
+    "model_send_failed": {"error", "error_type", "failed_peer_ids", "sent_peer_ids"},
+    "model_send_started": {"peer_ids", "weight_summary"},
+    "models_converged": {"mean_similarity", "peer_count"},
+    "peer_disconnected": {"peer_id"},
+    "peer_discovered": {"peer_id"},
+    "post_aggregation_eval": {"accuracy", "loss"},
+    "security.tunnel_downgrade": {"connection_mode", "domain", "reason"},
+    "subscriber.error": {"error", "error_type", "source_event_type", "subscriber"},
+    "telemetry.delivery_failed": {"base_url", "consecutive_failures", "error", "error_type", "failure_rate_per_minute", "failure_window_seconds", "kind", "pending_queue_size"},
+    "telemetry.disconnected": {"base_url", "consecutive_failures", "error", "error_type", "kind", "pending_queue_size"},
+    "telemetry.events_dropped": {"count", "max_pending_events"},
+    "telemetry.status_provider_warning": {"base_url", "error", "error_type"},
+    "tunnel_payload_dropped": {"error", "error_type", "message_type", "peer_id", "reason", "security_event", "sender_id"},
+}
+
+
+def _fallback_allowlist_for(event_type: str) -> set[str]:
+    if event_type in FALLBACK_PAYLOAD_ALLOWLIST:
+        return FALLBACK_PAYLOAD_ALLOWLIST[event_type]
+    if event_type.startswith("security."):
+        return {"connection_mode", "domain", "error", "error_type", "message_type", "peer_id", "reason", "sender_id"}
+    return set()
+
+
 def _format_number(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4f}".rstrip("0").rstrip(".")
@@ -168,13 +199,17 @@ def _format_telemetry_connected(event: RuntimeEvent) -> str:
     return f"[TELEMETRY] connected to {p.get('base_url', '?')} (heartbeat every {p.get('heartbeat_interval', '?')}s)"
 
 
-def _format_fallback_payload(payload: dict) -> str:
+def _format_fallback_payload(event_type: str, payload: dict) -> str:
     pieces: List[str] = []
+    allowlist = _fallback_allowlist_for(event_type)
     for key in sorted(payload):
         if key in {"node_id", "round"}:
             continue
         value = payload[key]
         if value is None:
+            continue
+        if key not in allowlist:
+            pieces.append(f"{key}=<redacted:{key}>")
             continue
         if key == "weight_summary":
             formatted = _format_weight_summary(value)
@@ -214,7 +249,7 @@ def format_runtime_event(event: RuntimeEvent) -> str:
     if event.event_type == "telemetry.connected":
         return _format_telemetry_connected(event)
 
-    fallback = _format_fallback_payload(event.payload or {})
+    fallback = _format_fallback_payload(event.event_type, event.payload or {})
     if fallback:
         return _join_parts([_prefix(event), event.event_type, fallback])
     return _join_parts([_prefix(event), event.event_type])

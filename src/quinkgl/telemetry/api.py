@@ -1,14 +1,37 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+DEFAULT_TELEMETRY_AUTH_HEADER = "X-QuinkGL-Telemetry-Secret"
+TELEMETRY_AUTH_SECRET_ENV = "QUINKGL_TELEMETRY_SECRET"
+TELEMETRY_AUTH_HEADER_ENV = "QUINKGL_TELEMETRY_SECRET_HEADER"
+TELEMETRY_CORS_ALLOW_ORIGINS_ENV = "QUINKGL_TELEMETRY_CORS_ALLOW_ORIGINS"
 
 
 class TelemetryEventIngest(BaseModel):
     event_type: str = Field(min_length=1)
-    timestamp: Optional[str] = None
+    timestamp: Optional[datetime] = None
     payload: Dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "TelemetryEventIngest":
+        node_id = self.payload.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError("payload.node_id is required")
+
+        round_number = self.payload.get("round")
+        if round_number is not None:
+            try:
+                payload = dict(self.payload)
+                payload["round"] = int(round_number)
+                self.payload = payload
+            except (TypeError, ValueError) as exc:
+                raise ValueError("payload.round must be an integer") from exc
+        return self
 
 
 class TelemetryConnectionStatusIngest(BaseModel):
@@ -30,4 +53,4 @@ class TelemetryHeartbeatIngest(BaseModel):
     known_peer_count: Optional[int] = None
     ipv8_peers: Optional[int] = None
     tunnel_peers: Optional[int] = None
-    timestamp: Optional[str] = None
+    timestamp: Optional[datetime] = None

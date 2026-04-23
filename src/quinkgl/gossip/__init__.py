@@ -13,10 +13,13 @@ Usage:
 
 from quinkgl.gossip.protocol import GossipProtocol, MessageType
 from quinkgl.gossip.aggregator import ModelAggregator, GossipOrchestrator
+from quinkgl.gossip.trust import TrainingMetrics, TrustPolicy
 
 __all__ = [
     "GossipProtocol",
     "MessageType",
     "ModelAggregator",
     "GossipOrchestrator",  # Deprecated alias (use ModelAggregator instead)
+    "TrustPolicy",
+    "TrainingMetrics",
 ]

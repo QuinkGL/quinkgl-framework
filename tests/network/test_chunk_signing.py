@@ -36,37 +36,67 @@ def _generate_keypair():
         pytest.skip("ipv8 crypto not available")
 
 
+def _metadata(**overrides):
+    data = {
+        "sample_count": 8,
+        "loss": 0.1,
+        "accuracy": 0.9,
+        "timestamp": 123456,
+        "total_chunks": 4,
+    }
+    data.update(overrides)
+    return data
+
+
 # ---------------------------------------------------------------------------
 # B14-1: Canonical sign data is deterministic
 # ---------------------------------------------------------------------------
 
 def test_sign_data_deterministic():
-    a = _chunk_sign_data("alice", 5, "schema-hash", 3, b"hello")
-    b = _chunk_sign_data("alice", 5, "schema-hash", 3, b"hello")
+    a = _chunk_sign_data("alice", 5, "schema-hash", 3, b"hello", **_metadata())
+    b = _chunk_sign_data("alice", 5, "schema-hash", 3, b"hello", **_metadata())
     assert a == b
 
 
 def test_sign_data_changes_with_sender():
-    a = _chunk_sign_data("alice", 5, "s", 0, b"data")
-    b = _chunk_sign_data("bob", 5, "s", 0, b"data")
+    a = _chunk_sign_data("alice", 5, "s", 0, b"data", **_metadata())
+    b = _chunk_sign_data("bob", 5, "s", 0, b"data", **_metadata())
     assert a != b
 
 
 def test_sign_data_changes_with_round():
-    a = _chunk_sign_data("alice", 1, "s", 0, b"data")
-    b = _chunk_sign_data("alice", 2, "s", 0, b"data")
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata())
+    b = _chunk_sign_data("alice", 2, "s", 0, b"data", **_metadata())
     assert a != b
 
 
 def test_sign_data_changes_with_chunk_index():
-    a = _chunk_sign_data("alice", 1, "s", 0, b"data")
-    b = _chunk_sign_data("alice", 1, "s", 1, b"data")
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata())
+    b = _chunk_sign_data("alice", 1, "s", 1, b"data", **_metadata())
     assert a != b
 
 
 def test_sign_data_changes_with_chunk_data():
-    a = _chunk_sign_data("alice", 1, "s", 0, b"data-A")
-    b = _chunk_sign_data("alice", 1, "s", 0, b"data-B")
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data-A", **_metadata())
+    b = _chunk_sign_data("alice", 1, "s", 0, b"data-B", **_metadata())
+    assert a != b
+
+
+def test_sign_data_changes_with_sample_count():
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(sample_count=8))
+    b = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(sample_count=9))
+    assert a != b
+
+
+def test_sign_data_changes_with_total_chunks():
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(total_chunks=4))
+    b = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(total_chunks=5))
+    assert a != b
+
+
+def test_sign_data_changes_with_timestamp():
+    a = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(timestamp=123))
+    b = _chunk_sign_data("alice", 1, "s", 0, b"data", **_metadata(timestamp=124))
     assert a != b
 
 
@@ -76,8 +106,8 @@ def test_sign_data_changes_with_chunk_data():
 
 def test_sign_verify_roundtrip():
     key = _generate_keypair()
-    sig = _chunk_sign(key, "alice", 10, "schema", 0, b"chunk-bytes")
-    assert _chunk_verify(key.pub(), sig, "alice", 10, "schema", 0, b"chunk-bytes")
+    sig = _chunk_sign(key, "alice", 10, "schema", 0, b"chunk-bytes", **_metadata())
+    assert _chunk_verify(key.pub(), sig, "alice", 10, "schema", 0, b"chunk-bytes", **_metadata())
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +116,8 @@ def test_sign_verify_roundtrip():
 
 def test_tampered_chunk_rejected():
     key = _generate_keypair()
-    sig = _chunk_sign(key, "alice", 10, "schema", 0, b"original")
-    assert not _chunk_verify(key.pub(), sig, "alice", 10, "schema", 0, b"tampered")
+    sig = _chunk_sign(key, "alice", 10, "schema", 0, b"original", **_metadata())
+    assert not _chunk_verify(key.pub(), sig, "alice", 10, "schema", 0, b"tampered", **_metadata())
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +127,17 @@ def test_tampered_chunk_rejected():
 def test_impersonation_rejected():
     key_alice = _generate_keypair()
     key_bob = _generate_keypair()
-    sig = _chunk_sign(key_alice, "alice", 10, "schema", 0, b"data")
+    sig = _chunk_sign(key_alice, "alice", 10, "schema", 0, b"data", **_metadata())
     # Verify with bob's key should fail
-    assert not _chunk_verify(key_bob.pub(), sig, "alice", 10, "schema", 0, b"data")
+    assert not _chunk_verify(key_bob.pub(), sig, "alice", 10, "schema", 0, b"data", **_metadata())
+
+
+def test_sample_count_tampering_rejected():
+    key = _generate_keypair()
+    sig = _chunk_sign(key, "alice", 10, "schema", 0, b"data", **_metadata(sample_count=8))
+    assert not _chunk_verify(
+        key.pub(), sig, "alice", 10, "schema", 0, b"data", **_metadata(sample_count=9)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +146,7 @@ def test_impersonation_rejected():
 
 def test_empty_signature_rejected():
     key = _generate_keypair()
-    assert not _chunk_verify(key.pub(), b"", "alice", 1, "s", 0, b"data")
+    assert not _chunk_verify(key.pub(), b"", "alice", 1, "s", 0, b"data", **_metadata())
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +165,7 @@ def test_payload_signature_field():
         loss=0.1,
         accuracy=0.9,
         chunk_data=b"data",
+        timestamp=123,
         signature=b"sig-bytes",
     )
     assert p.signature == b"sig-bytes"
@@ -148,5 +187,6 @@ def test_payload_default_empty_signature():
         loss=0.1,
         accuracy=0.9,
         chunk_data=b"data",
+        timestamp=123,
     )
     assert p.signature == b""
