@@ -49,8 +49,8 @@ pip install quinkgl
 For development:
 
 ```bash
-git clone https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework.git
-cd QuinkGL-Gossip-Learning-Framework
+git clone https://github.com/QuinkGL/quinkgl-framework.git
+cd quinkgl-framework
 pip install -e ".[dev]"
 ```
 
