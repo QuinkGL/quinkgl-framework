@@ -19,6 +19,12 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from quinkgl import GossipNode
 from quinkgl.manifest import SwarmManifest, load_manifest
 from quinkgl.manifest.errors import ERR_RUN_NO_STANDARD_MODEL
+from quinkgl.manifest.strategy_factory import (
+    ERR_RUN_UNKNOWN_AGGREGATION,
+    ERR_RUN_UNKNOWN_TOPOLOGY,
+    build_aggregation_from_manifest,
+    build_topology_from_manifest,
+)
 from quinkgl.models import PyTorchModel
 
 from .exit_codes import (
@@ -44,6 +50,12 @@ def build_parser(sub: _SubParsersAction) -> None:
     parser.add_argument("--trust-policy", choices=["open", "tofu", "pinned"], default="open")
     parser.add_argument("--trusted-pubkey", action="append", default=[])
     parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument(
+        "--gossip-interval",
+        type=float,
+        default=None,
+        help="Seconds to wait for peer updates before aggregating (default: 60)",
+    )
     parser.add_argument("--telemetry-url", default=None)
     parser.add_argument("--telemetry-secret", default=None)
     parser.add_argument("--telemetry-heartbeat-interval", type=float, default=5.0)
@@ -320,6 +332,27 @@ async def _async_run(args: argparse.Namespace) -> int:
         if user_scheduler is not None:
             setattr(script_mod, "_quinkgl_user_scheduler", user_scheduler)
 
+    # 3c. Swarm protocol strategies from the manifest (must match
+    # ``manifest.aggregation_name`` / ``manifest.topology_name`` for
+    # ``strict_manifest`` in :class:`GossipNode`).
+    try:
+        topology = build_topology_from_manifest(manifest)
+        aggregation = build_aggregation_from_manifest(manifest)
+    except ValueError as exc:
+        err_code = exc.args[0] if exc.args else None
+        if err_code in (ERR_RUN_UNKNOWN_TOPOLOGY, ERR_RUN_UNKNOWN_AGGREGATION):
+            detail = exc.args[1] if len(exc.args) > 1 else {}
+            kind = "topology" if err_code == ERR_RUN_UNKNOWN_TOPOLOGY else "aggregation"
+            log.error(
+                "Unknown manifest %s strategy %r. Built-in: %s",
+                kind,
+                detail.get("name"),
+                ", ".join(detail.get("known", [])),
+            )
+        else:
+            log.error("Invalid manifest strategy parameters: %s", exc, exc_info=True)
+        return NODE_CONFIG_ERROR
+
     # 4. Construct GossipNode
     try:
         node = GossipNode(
@@ -327,10 +360,17 @@ async def _async_run(args: argparse.Namespace) -> int:
             manifest=manifest,
             model=model,
             port=args.port,
+            topology=topology,
+            aggregation=aggregation,
             trust_policy=args.trust_policy,
             trusted_creator_pubkeys=trusted_pubkeys,
             quiet=args.quiet,
             training_config=training_config,
+            gossip_interval=(
+                float(args.gossip_interval)
+                if args.gossip_interval is not None
+                else 60.0
+            ),
         )
     except Exception as exc:
         log.error("Failed to construct GossipNode: %s", exc)
@@ -371,7 +411,12 @@ async def _async_run(args: argparse.Namespace) -> int:
 
     try:
         async with node:
-            await node.train(rounds=rounds, on_round_end=per_round)
+            await node.train(
+                rounds=rounds,
+                data_provider=train_loader,
+                eval_data_provider=val_loader,
+                on_round_end=per_round,
+            )
     except Exception as exc:
         log.error("Training failed: %s", exc, exc_info=True)
         return NODE_CONFIG_ERROR

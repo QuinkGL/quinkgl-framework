@@ -1230,7 +1230,8 @@ class ModelAggregator:
                             )
                         await self.consensus_tracker.prune_old_checkpoints()
 
-                    # Reset error counter on successful round
+                    round_duration = (datetime.now() - round_start_time).total_seconds()
+
                     self._emit_event("round_completed", {
                         "node_id": self.peer_id,
                         "round": self.current_round,
@@ -1238,7 +1239,6 @@ class ModelAggregator:
                     })
                     consecutive_errors = 0
 
-                    round_duration = (datetime.now() - round_start_time).total_seconds()
                     logger.debug(f"Round {self.current_round} completed in {round_duration:.2f}s")
 
                 except asyncio.CancelledError:
