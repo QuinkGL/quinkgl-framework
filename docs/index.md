@@ -4,7 +4,7 @@ QuinkGL is a decentralized gossip learning framework for P2P edge intelligence.
 
 ## Decision Tree
 
-- Are you new to QuinkGL? → Start with [Tutorial T1](tutorials/T1/index.md)
+- Are you new to QuinkGL? → [Getting started](getting-started.md) (or [Türkçe](getting-started-tr.md)), then [Tutorial T1](tutorials/T1/index.md)
 - Are you a swarm creator? → [User Guide](user-guide/index.md) + Tutorial T2
 - Are you a peer operator? → [User Guide](user-guide/index.md) + [CLI Reference](cli/index.md)
 - Need a custom model/data? → Tutorial T4 + [API Reference](reference/index.md)
@@ -17,6 +17,8 @@ QuinkGL is a decentralized gossip learning framework for P2P edge intelligence.
 :maxdepth: 2
 
 quickstart
+getting-started
+getting-started-tr
 user-guide/index
 cli/index
 tutorials/index

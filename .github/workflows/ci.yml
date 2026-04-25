@@ -18,6 +18,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pyipv8 → libnacl expects a system libsodium (not bundled in wheels on all platforms).
+      - name: Install libsodium (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Install libsodium (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libsodium
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+
+      - name: Install libsodium (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22-msvc.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\libsodium.zip"
+          Expand-Archive "$env:TEMP\libsodium.zip" -DestinationPath "$env:TEMP\libsodium" -Force
+          $dll = Get-ChildItem "$env:TEMP\libsodium" -Recurse -Filter "libsodium.dll" |
+            Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' } |
+            Select-Object -First 1
+          if (-not $dll) { throw "libsodium.dll (x64 Release) not found in archive" }
+          Copy-Item $dll.FullName -Destination "$env:SystemRoot\System32\libsodium.dll" -Force
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

@@ -32,14 +32,29 @@ def _make_community():
     community._outgoing_transfers = {}
     community._nack_resend_counts = {}
     community._nack_buckets = {}
+    community._nack_transfer_buckets = {}
     community.node_id = "local"
     community.data_schema_hash = "abc"
     community.event_emitter = MagicMock()
     # mock my_peer.key for chunk signing in NACK resend path
     community.my_peer = MagicMock()
     community.my_peer.key.signature = MagicMock(return_value=b"\x00" * 64)
-    # Bind the real method
+    # Bind the real methods
     community._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(community)
+    community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
+    community.metrics = {
+        'chunk_transfers_started': 0,
+        'chunk_transfers_completed': 0,
+        'chunk_transfers_failed_timeout': 0,
+        'chunk_transfers_rejected_peer_limit': 0,
+        'nacks_sent': 0,
+        'nacks_received': 0,
+        'nacks_ignored_budget': 0,
+        'chunks_resent': 0,
+    }
+    community._inflight_transfers = {}
+    # Alias for old test API — on_request_chunks is the real handler
+    community._dispatch_request_chunks = GossipLearningCommunity.on_request_chunks.__get__(community)
     return community
 
 

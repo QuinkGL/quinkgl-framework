@@ -39,6 +39,8 @@ def _make_community():
     community = MagicMock(spec=GossipLearningCommunity)
     community._last_seen_round = {}
     community._chunk_buffers = {}
+
+    community._recent_chunks = {}
     community.known_peers = {}
     community._mid_to_node_id = {}
     community._heartbeat_sequence = 0
@@ -54,6 +56,23 @@ def _make_community():
     community._persist_last_seen_round_state = GossipLearningCommunity._persist_last_seen_round_state.__get__(community)
     community._record_last_seen_round = GossipLearningCommunity._record_last_seen_round.__get__(community)
     community._get_local_round = GossipLearningCommunity._get_local_round.__get__(community)
+    # v3: new state required by gossip_community.py
+    community.metrics = {
+        'chunk_transfers_started': 0,
+        'chunk_transfers_completed': 0,
+        'chunk_transfers_failed_timeout': 0,
+        'chunk_transfers_rejected_peer_limit': 0,
+        'nacks_sent': 0,
+        'nacks_received': 0,
+        'nacks_ignored_budget': 0,
+        'chunks_resent': 0,
+    }
+    community._nack_transfer_buckets = {}
+    community._inflight_transfers = {}
+    community._completed_chunk_transfers = {}
+    community._recent_chunks = {}
+    community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
+    community._dispatch_model_update = GossipLearningCommunity.on_model_update.__get__(community)
     return community
 
 
@@ -160,25 +179,27 @@ class TestModelUpdateReplay:
 
 class TestChunkReplay:
     @pytest.mark.asyncio
-    async def test_rejects_stale_chunked_transfer(self):
+    async def test_rejects_duplicate_completed_transfer(self):
         c = _make_community()
         peer = _make_peer("cc" * 20)
         mid = peer.mid.hex()
-        c._last_seen_round[mid] = 8
+        # v3: transfer-based replay protection
+        c._completed_chunk_transfers[(mid, "tid-1")] = 1234567890.0
 
         payload = _chunk_payload("tid-1", "node-c", round_number=5)
-        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
-        # No buffer should have been created
+        # No buffer should have been created (duplicate completed transfer)
         assert len(c._chunk_buffers) == 0
 
     @pytest.mark.asyncio
-    async def test_accepts_new_round_chunked(self):
+    async def test_accepts_new_transfer_same_round(self):
         c = _make_community()
         peer = _make_peer("dd" * 20)
 
+        # v3: same round but new transfer_id should be accepted
         payload = _chunk_payload("tid-2", "node-d", round_number=10)
-        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         # Buffer should have been created
         assert len(c._chunk_buffers) == 1
@@ -190,22 +211,25 @@ class TestChunkReplay:
         peer = _make_peer("de" * 20)
 
         payload = _chunk_payload("tid-future", "node-future", round_number=MAX_ROUND_SKIP + 4)
-        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
         assert len(c._chunk_buffers) == 0
         emitted = [call.args[0] for call in c.event_emitter.emit.call_args_list]
         assert emitted == ["security.future_round_rejected", "ipv8_payload_dropped"]
 
     @pytest.mark.asyncio
-    async def test_chunk_callback_failure_does_not_advance_round(self):
+    async def test_chunk_callback_failure_records_completed_anyway(self):
         c = _make_community()
         peer = _make_peer("df" * 20)
         c.on_model_update_callback = AsyncMock(side_effect=RuntimeError("chunk boom"))
 
         payload = _chunk_payload("tid-cb", "node-cb", round_number=11, total_chunks=1)
-        await GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(c, peer, payload)
 
-        assert peer.mid.hex() not in c._last_seen_round
+        # v3: transfer is recorded as completed BEFORE the async callback runs,
+        # so that late chunks (including NACK resends with non-deterministic
+        # signatures) are rejected even if the callback eventually fails.
+        assert (peer.mid.hex(), "tid-cb") in c._completed_chunk_transfers
 
 
 class TestReplayPersistence:

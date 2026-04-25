@@ -265,6 +265,7 @@ class GossipNode:
         enable_fallback: bool = True,
         fallback_timeout: float = 30.0,
         min_peers_before_aggregate: int = 1,
+        stale_round_tolerance: int = 10,
         data_policy: Optional[Any] = None,
         fingerprint: Optional[Any] = None,
         require_signature: bool = True,
@@ -307,6 +308,7 @@ class GossipNode:
             enable_fallback: Enable tunnel fallback when IPv8 fails
             fallback_timeout: Seconds to wait for IPv8 before fallback
             min_peers_before_aggregate: Minimum updates before aggregation
+            stale_round_tolerance: Maximum round gap for accepted updates
             quiet: If True, no default TerminalObserver is attached.
                 Events are still emitted and can be consumed by custom observers.
         """
@@ -448,21 +450,29 @@ class GossipNode:
             aggregation = FedAvg()
 
         # Create the framework LearningNode
+        # ``domain=`` in the GossipNode constructor is only set for the legacy
+        # manifest-free path.  Manifest mode leaves it ``None`` and derives
+        # ``effective_domain`` from the manifest task.  The LearningNode and
+        # ModelAggregator *must* use that same string — otherwise
+        # ``SelectionContext.my_domain`` does not match discovery announcers
+        # (``peer_info.domain``) and :meth:`get_compatible_peers` always returns
+        # empty, yielding no gossip targets.
         self.gl_node = LearningNode(
             peer_id=node_id,
-            domain=domain,
+            domain=effective_domain,
             model=model,
             topology=topology,
             aggregation=aggregation,
             data_schema_hash=self.data_schema_hash,
             gossip_interval=gossip_interval,
             training_config=training_config,
-            min_peers_before_aggregate=min_peers_before_aggregate
+            min_peers_before_aggregate=min_peers_before_aggregate,
+            stale_round_tolerance=stale_round_tolerance,
         )
 
         # IPv8 manager
         self.ipv8_manager = IPv8Manager(node_id=node_id, port=port)
-        self.ipv8_manager.domain = domain
+        self.ipv8_manager.domain = effective_domain
         self.ipv8_manager.data_schema_hash = self.data_schema_hash
         self.ipv8_manager.require_signature = require_signature
         self.ipv8_manager.last_seen_round_state_path = ""
@@ -511,7 +521,8 @@ class GossipNode:
             self.attach_terminal_observer()
 
         logger.debug(
-            f"GossipNode initialized: node_id={node_id}, domain={domain}, "
+            f"GossipNode initialized: node_id={node_id}, "
+            f"domain={effective_domain!r} (raw domain arg={domain!r}), "
             f"schema={self.data_schema_hash[:8]}..., "
             f"fallback={'enabled' if enable_fallback else 'disabled'}"
         )
@@ -1252,19 +1263,11 @@ class GossipNode:
 
         logger.debug(f"Synced {self.community.get_peer_count()} peers to aggregator")
 
-    async def run_continuous(self, data=None, data_provider=None):
-        """
-        Run continuous gossip learning.
-
-        Args:
-            data: Training data (single dataset)
-            data_provider: Callable that returns training data per round
-        """
+    async def _wire_gl_continuous_loop(self) -> None:
+        """Attach send callback, fingerprint, and sync before ``run_continuous``."""
         if not self.running:
             raise RuntimeError("Node must be started before running")
 
-        # Single dynamic dispatch — reads connection_mode on each call
-        # so failback / mode changes take effect immediately.
         async def send_to_peer(peer_id: str, message):
             if self.connection_mode == ConnectionMode.IPV8_P2P:
                 await self.community.send_model_update(
@@ -1273,7 +1276,7 @@ class GossipNode:
                     sample_count=message.sample_count,
                     round_number=message.round_number,
                     loss=message.loss,
-                    accuracy=message.accuracy
+                    accuracy=message.accuracy,
                 )
             else:
                 await self._send_model_update_via_tunnel(peer_id, message)
@@ -1281,13 +1284,21 @@ class GossipNode:
         self.gl_node.aggregator.send_message_callback = send_to_peer
         self._configure_local_fingerprint_runtime()
 
-        # Sync peers before starting
         if self.connection_mode == ConnectionMode.IPV8_P2P:
             self._sync_known_peers()
 
-        # Announce ourselves to other tunnel peers
         if self.connection_mode == ConnectionMode.TUNNEL_RELAY:
             await self._announce_to_tunnel()
+
+    async def run_continuous(self, data=None, data_provider=None):
+        """
+        Run continuous gossip learning.
+
+        Args:
+            data: Training data (single dataset)
+            data_provider: Callable that returns training data per round
+        """
+        await self._wire_gl_continuous_loop()
 
         # B13: Track the gossip-loop task so shutdown() can cancel it
         self._run_task = asyncio.current_task()
@@ -1384,13 +1395,31 @@ class GossipNode:
                 logger.debug(f"Failed to announce to {peer_id}: {e}")
 
     def stop(self):
-        """Stop the node."""
+        """Stop the node (best-effort, sync path).
+
+        ``LearningNode.stop`` is a coroutine; when called from a running
+        event loop we schedule it, otherwise we fall back to
+        ``asyncio.run`` so callers on the sync path still get a graceful
+        teardown.  Prefer :meth:`shutdown` for the fully async flow.
+        """
         if not self.running:
             return
 
         logger.debug(f"Stopping GossipNode '{self.node_id}'...")
 
-        self.gl_node.stop()
+        coro = self.gl_node.stop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(coro)
+        else:
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover — best effort
+                logger.debug("Sync stop() teardown raised: %s", exc)
+
         self.running = False
         if self._telemetry_client is not None:
             self._telemetry_client.pause()
@@ -1503,6 +1532,8 @@ class GossipNode:
         self,
         *,
         rounds: int,
+        data_provider: Any = None,
+        eval_data_provider: Any = None,
         stop_condition: Optional[Callable[[int, Dict[str, float]], bool]] = None,
         on_round_end: Optional[
             Callable[[int, Dict[str, float]], Awaitable[None]]
@@ -1538,37 +1569,85 @@ class GossipNode:
         if self.state is NodeState.PEERS_DISCOVERED:
             self.begin_training(rounds=rounds)
 
-        # The full gossip loop is owned by ``LearningNode``/``gl_node``; we
-        # delegate the per-round tick to it and use our own counter for
-        # hook dispatch.  The inner method MAY be sync (returns a metrics
-        # dict) or async; we coerce both.
-        step = getattr(self.gl_node, "run_round", None)
-        for idx in range(rounds):
-            metrics: Dict[str, float] = {}
-            if step is not None:
-                try:
-                    result = step()
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    if isinstance(result, dict):
-                        metrics = {
+        # The full gossip loop lives in ``LearningNode.run_continuous``
+        # (which delegates to the aggregator).  We kick it off as a
+        # background task and bridge per-round notifications + rounds cap
+        # to the caller by polling ``aggregator.current_round`` +
+        # ``aggregator.metrics``.
+        aggregator = self.gl_node.aggregator
+
+        async def _run_continuous_task() -> None:
+            # Match :meth:`run_continuous` (transport wiring + community sync) so
+            # ``send_message_callback`` and ``known_peers`` are set before the
+            # gossip loop, not only the bare :meth:`LearningNode.run_continuous`
+            # path.
+            await self._wire_gl_continuous_loop()
+            await self.gl_node.run_continuous(
+                data_provider=data_provider,
+                eval_data_provider=eval_data_provider,
+            )
+
+        training_task = asyncio.create_task(_run_continuous_task())
+
+        seen_round = 0
+        poll_interval = 0.2
+        try:
+            while True:
+                current = int(getattr(aggregator, "current_round", 0))
+                if current > seen_round:
+                    for round_idx in range(seen_round, current):
+                        raw_metrics = getattr(aggregator, "metrics", {}) or {}
+                        metrics: Dict[str, float] = {
                             k: float(v)
-                            for k, v in result.items()
+                            for k, v in raw_metrics.items()
                             if isinstance(v, (int, float))
                         }
-                except Exception as exc:  # pragma: no cover — defensive
-                    logger.warning("train round %d failed: %s", idx, exc)
-            if on_round_end is not None:
+                        if on_round_end is not None:
+                            try:
+                                await on_round_end(round_idx, metrics)
+                            except Exception as exc:
+                                logger.warning(
+                                    "on_round_end hook raised: %s", exc
+                                )
+                        if stop_condition is not None:
+                            try:
+                                if stop_condition(round_idx, metrics):
+                                    aggregator.running = False
+                            except Exception as exc:  # pragma: no cover
+                                logger.warning(
+                                    "stop_condition raised, ignoring: %s", exc
+                                )
+                    seen_round = current
+
+                if seen_round >= rounds:
+                    aggregator.running = False
+
+                if training_task.done():
+                    break
+
                 try:
-                    await on_round_end(idx, metrics)
-                except Exception as exc:
-                    logger.warning("on_round_end hook raised: %s", exc)
-            if stop_condition is not None:
+                    await asyncio.wait_for(
+                        asyncio.shield(asyncio.sleep(poll_interval)),
+                        timeout=poll_interval + 0.1,
+                    )
+                except asyncio.TimeoutError:  # pragma: no cover
+                    pass
+        finally:
+            aggregator.running = False
+            if not training_task.done():
                 try:
-                    if stop_condition(idx, metrics):
-                        break
-                except Exception as exc:  # pragma: no cover — defensive
-                    logger.warning("stop_condition raised, ignoring: %s", exc)
+                    await asyncio.wait_for(training_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    training_task.cancel()
+                    try:
+                        await training_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            elif training_task.exception() is not None:
+                logger.warning(
+                    "run_continuous task raised: %s",
+                    training_task.exception(),
+                )
 
     async def __aenter__(self) -> "GossipNode":
         await self.start()

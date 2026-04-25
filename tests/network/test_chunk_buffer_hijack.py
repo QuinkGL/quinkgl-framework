@@ -30,6 +30,18 @@ def _make_community():
     """Create a minimal community stub with the fields on_model_chunk needs."""
     community = MagicMock(spec=GossipLearningCommunity)
     community._chunk_buffers = {}
+    community._recent_chunks = {}
+    community._completed_chunk_transfers = {}
+    community.metrics = {
+        'chunk_transfers_started': 0,
+        'chunk_transfers_completed': 0,
+        'chunk_transfers_failed_timeout': 0,
+        'chunk_transfers_rejected_peer_limit': 0,
+        'nacks_sent': 0,
+        'nacks_received': 0,
+        'nacks_ignored_budget': 0,
+        'chunks_resent': 0,
+    }
     community.known_peers = {}
     community._heartbeat_sequence = 0
     community.node_id = "local"
@@ -37,6 +49,8 @@ def _make_community():
     community._last_seen_round = {}
     community._mid_to_node_id = {}
     community.require_signature = False
+    community.max_round_skip = 1000
+    community.current_round_provider = lambda: 0
     return community
 
 
@@ -73,10 +87,10 @@ class TestChunkBufferIsolation:
         payload_b = _make_chunk_payload(tid, "victim", 0, 2, b"B-data-0")
 
         # Invoke the real handler logic
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer_a, payload_a
         )
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer_b, payload_b
         )
 
@@ -103,10 +117,10 @@ class TestChunkBufferIsolation:
         p0 = _make_chunk_payload(tid, "node-1", 0, 3, b"chunk-0")
         p1 = _make_chunk_payload(tid, "node-1", 1, 3, b"chunk-1")
 
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p0
         )
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p1
         )
 

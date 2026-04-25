@@ -429,11 +429,30 @@ QuinkGL supports personalization techniques to handle statistical heterogeneity:
 
 ## Documentation
 
+The canonical documentation set lives under [`docs/`](docs/). Use **[`docs/index.md`](docs/index.md)** as the entry point: it has a short decision tree and a table of contents that mirrors the book layout (Sphinx toctree).
+
+### Quick entry
+
 | Document | Description |
 |----------|-------------|
-| [QUINKGL_FRAMEWORK.md](QUINKGL_FRAMEWORK.md) | Complete user guide with all features and examples |
-| [DOMAIN_AWARE_COLLABORATION_DESIGN.md](DOMAIN_AWARE_COLLABORATION_DESIGN.md) | Domain-aware collaboration design (fingerprint + affinity + personalization) |
-| [SWARM_MANIFEST_PROPOSAL.md](SWARM_MANIFEST_PROPOSAL.md) | Swarm Manifest design (BitTorrent-inspired protocol identity) |
+| [`docs/index.md`](docs/index.md) | Hub: decision tree and links into all sections |
+| [`docs/quickstart.md`](docs/quickstart.md) | Minimal “get running” path |
+| [`docs/getting-started.md`](docs/getting-started.md) | Full getting started (English) |
+| [`docs/getting-started-tr.md`](docs/getting-started-tr.md) | Full getting started (Turkish) |
+| [`docs/faq.md`](docs/faq.md) | Frequently asked questions |
+
+### By section
+
+| Section | Start here |
+|---------|------------|
+| User guide | [`docs/user-guide/index.md`](docs/user-guide/index.md) (manifest, peer script, trust, telemetry, troubleshooting) |
+| CLI | [`docs/cli/index.md`](docs/cli/index.md) (`manifest`, `run`, `init`, `keygen`, …) |
+| Tutorials | [`docs/tutorials/index.md`](docs/tutorials/index.md) (T1–T6) |
+| Concepts | [`docs/concepts/index.md`](docs/concepts/index.md) (gossip, swarm, fingerprints) |
+| Reference | [`docs/reference/index.md`](docs/reference/index.md) (API, manifest schema, error codes) |
+| Security | [`docs/security/index.md`](docs/security/index.md) (threat model, signing, TOFU, rate limits) |
+| Cookbook | [`docs/cookbook/index.md`](docs/cookbook/index.md) (local swarm, multi-peer testing, custom wrappers) |
+| Migration | [`docs/migration/index.md`](docs/migration/index.md) |
 
 ---
 

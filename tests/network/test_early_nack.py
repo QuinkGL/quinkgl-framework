@@ -29,11 +29,23 @@ def _make_community():
     community = MagicMock(spec=GossipLearningCommunity)
     community._chunk_buffers = {}
     community._nack_buckets = {}
+    community._nack_transfer_buckets = {}
     community.known_peers = {}
     community.node_id = "local"
     # Bind real methods
     community._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(community)
+    community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
     community._nack_incomplete_buffers = GossipLearningCommunity._nack_incomplete_buffers.__get__(community)
+    community.metrics = {
+        'chunk_transfers_started': 0,
+        'chunk_transfers_completed': 0,
+        'chunk_transfers_failed_timeout': 0,
+        'chunk_transfers_rejected_peer_limit': 0,
+        'nacks_sent': 0,
+        'nacks_received': 0,
+        'nacks_ignored_budget': 0,
+        'chunks_resent': 0,
+    }
     return community
 
 
