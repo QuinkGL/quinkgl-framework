@@ -642,7 +642,14 @@ class GossipNode:
             })
             emitter.emit("node.started", {
                 "node_id": self.node_id,
+                "domain": self.domain,
                 "connection_mode": mode_str,
+                "swarm_id": self.manifest.manifest_hash() if self.manifest else None,
+                "swarm_name": self.manifest.name if self.manifest else None,
+                "manifest_hash": self.manifest.manifest_hash() if self.manifest else None,
+                "aggregation_name": self.manifest.aggregation_name if self.manifest else None,
+                "topology_name": self.manifest.topology_name if self.manifest else None,
+                "manifest": self.manifest.to_dict() if self.manifest else None,
             })
 
     async def _try_start_ipv8_with_timeout(self) -> bool:
@@ -1735,7 +1742,12 @@ class GossipNode:
             "tunnel_server": self.tunnel_server,
             "known_peers": [
                 p.node_id for p in self.community.get_compatible_peers()
-            ] if self.community else list(self._tunnel_peers.keys())
+            ] if self.community else list(self._tunnel_peers.keys()),
+            "swarm_id": self.manifest.manifest_hash() if self.manifest else None,
+            "swarm_name": self.manifest.name if self.manifest else None,
+            "manifest_hash": self.manifest.manifest_hash() if self.manifest else None,
+            "aggregation_name": self.manifest.aggregation_name if self.manifest else None,
+            "topology_name": self.manifest.topology_name if self.manifest else None,
         }
 
     def get_model(self) -> ModelWrapper:
