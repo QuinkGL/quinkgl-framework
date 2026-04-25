@@ -642,7 +642,6 @@ class GossipNode:
             })
             emitter.emit("node.started", {
                 "node_id": self.node_id,
-                "domain": self.domain,
                 "connection_mode": mode_str,
                 "swarm_id": self.manifest.manifest_hash() if self.manifest else None,
                 "swarm_name": self.manifest.name if self.manifest else None,
