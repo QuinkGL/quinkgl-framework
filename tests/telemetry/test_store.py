@@ -566,6 +566,35 @@ def test_drop_node_cleans_up_swarm_nodes():
     assert swarms[0]["peer_count"] == 1
 
 
+def test_ingest_event_node_started_without_manifest_sets_swarm_fields_and_swarm_nodes():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_event(
+        "node.started",
+        {
+            "node_id": "node-a",
+            "swarm_id": "swarm-1",
+            "swarm_name": "Beta Swarm",
+            "manifest_hash": "hash-def",
+            "aggregation_name": "FedProx",
+            "topology_name": "Star",
+        },
+    )
+
+    node = store.get_node("node-a")
+    assert node["swarm_id"] == "swarm-1"
+    assert node["swarm_name"] == "Beta Swarm"
+    assert node["manifest_hash"] == "hash-def"
+    assert node["aggregation_name"] == "FedProx"
+    assert node["topology_name"] == "Star"
+
+    swarms = store.get_swarms()
+    assert len(swarms) == 1
+    assert swarms[0]["swarm_id"] == "swarm-1"
+    assert swarms[0]["swarm_name"] == "Beta Swarm"
+    assert swarms[0]["peer_count"] == 1
+    assert store.get_manifest("swarm-1") is None
+
+
 def test_ingest_heartbeat_caches_manifest_when_present():
     store = TelemetryStore(session_id="session-1")
     store.ingest_heartbeat({

@@ -175,16 +175,17 @@ class TelemetryStore:
 
         node_id = self._require_non_empty_node_id(payload.get("node_id"))
         node = self._get_or_create_node(node_id, payload.get("domain"), timestamp)
-        if event_type == "node.started" and "manifest" in payload:
+        if event_type == "node.started":
             sid = payload.get("swarm_id") or payload.get("manifest_hash")
-            if sid:
+            if sid and "manifest" in payload:
                 self._manifests[sid] = payload["manifest"]
-                self._swarm_nodes[sid].add(node_id)
             node.swarm_id = payload.get("swarm_id") or node.swarm_id
             node.swarm_name = payload.get("swarm_name") or node.swarm_name
             node.manifest_hash = payload.get("manifest_hash") or node.manifest_hash
             node.aggregation_name = payload.get("aggregation_name") or node.aggregation_name
             node.topology_name = payload.get("topology_name") or node.topology_name
+            if node.swarm_id:
+                self._swarm_nodes[node.swarm_id].add(node_id)
         event = NodeEvent(event_type=event_type, timestamp=timestamp, payload=dict(payload))
         node_events = self._events.setdefault(node_id, [])
         node_events.append(event)
