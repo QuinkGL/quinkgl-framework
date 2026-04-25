@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
+import json
 import logging
 import os
 from time import monotonic
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from quinkgl.telemetry.api import (
     DEFAULT_TELEMETRY_AUTH_HEADER,
@@ -159,6 +160,22 @@ def create_telemetry_app(
     @app.get("/api/network/stats")
     async def get_network_stats():
         return store.get_network_stats()
+
+    @app.get("/api/swarms")
+    async def get_swarms():
+        return store.get_swarms()
+
+    @app.get("/api/swarms/{swarm_id}/manifest")
+    async def get_swarm_manifest(swarm_id: str):
+        manifest = store.get_manifest(swarm_id)
+        if not manifest:
+            raise HTTPException(status_code=404, detail="Manifest not found for this swarm")
+        filename = f"{swarm_id[:16]}.qgl"
+        return Response(
+            content=json.dumps(manifest, indent=2, sort_keys=True),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
 
     @app.post("/api/telemetry/events", status_code=202)
     async def ingest_event(request: Request, event: TelemetryEventIngest):
