@@ -4,12 +4,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from collections import defaultdict
+
 from quinkgl.telemetry.models import (
     NetworkEdge,
     NodeEvent,
     NodeRoundSummary,
     NodeSnapshot,
     SessionSnapshot,
+    SwarmSnapshot,
 )
 
 
@@ -100,6 +103,8 @@ class TelemetryStore:
         self._events: Dict[str, List[NodeEvent]] = {}
         self._rounds: Dict[str, Dict[int, NodeRoundSummary]] = {}
         self._edges: Dict[Tuple[str, str, str], NetworkEdge] = {}
+        self._manifests: Dict[str, dict] = {}
+        self._swarm_nodes: Dict[str, set] = defaultdict(set)
 
     def ingest_heartbeat(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         timestamp = _parse_datetime(snapshot.get("timestamp")) or datetime.now()
@@ -124,6 +129,13 @@ class TelemetryStore:
             default=len(node.peer_ids),
             field_name="known_peer_count",
         )
+        node.swarm_id = snapshot.get("swarm_id") or node.swarm_id
+        node.swarm_name = snapshot.get("swarm_name") or node.swarm_name
+        node.manifest_hash = snapshot.get("manifest_hash") or node.manifest_hash
+        node.aggregation_name = snapshot.get("aggregation_name") or node.aggregation_name
+        node.topology_name = snapshot.get("topology_name") or node.topology_name
+        if node.swarm_id:
+            self._swarm_nodes[node.swarm_id].add(node_id)
         node.refresh_uptime(timestamp)
         return self._broadcasts_for(node, None, None)
 
@@ -161,6 +173,11 @@ class TelemetryStore:
 
         node_id = self._require_non_empty_node_id(payload.get("node_id"))
         node = self._get_or_create_node(node_id, payload.get("domain"), timestamp)
+        if event_type == "node.started" and "manifest" in payload:
+            sid = payload.get("swarm_id") or payload.get("manifest_hash")
+            if sid:
+                self._manifests[sid] = payload["manifest"]
+                self._swarm_nodes[sid].add(node_id)
         event = NodeEvent(event_type=event_type, timestamp=timestamp, payload=dict(payload))
         node_events = self._events.setdefault(node_id, [])
         node_events.append(event)
@@ -333,6 +350,38 @@ class TelemetryStore:
             "message_volume": sum(edge.exchange_count for edge in self._edges.values()),
         }
 
+    def get_swarms(self) -> List[Dict[str, Any]]:
+        swarms: Dict[str, SwarmSnapshot] = {}
+        for node_id, node in self._nodes.items():
+            sid = node.swarm_id
+            if not sid:
+                continue
+            manifest = self._manifests.get(sid, {})
+            if sid not in swarms:
+                swarms[sid] = SwarmSnapshot(
+                    swarm_id=sid,
+                    swarm_name=node.swarm_name or manifest.get("name", "Unnamed swarm"),
+                    manifest_hash=node.manifest_hash or sid,
+                    description=manifest.get("description", ""),
+                    peer_count=0,
+                    aggregation_name=node.aggregation_name or manifest.get("aggregation", {}).get("name", ""),
+                    topology_name=node.topology_name or manifest.get("topology", {}).get("name", ""),
+                    task_type=manifest.get("task", {}).get("type", ""),
+                    input_shape=manifest.get("task", {}).get("input_shape", []),
+                    output_shape=manifest.get("task", {}).get("output_shape", []),
+                    label_type=manifest.get("task", {}).get("label_type", ""),
+                    round_limit=manifest.get("round_limit"),
+                    created_at=manifest.get("created_at"),
+                    domains=[],
+                )
+            swarms[sid].domains = list(set(swarms[sid].domains + [node.domain]))
+        for sid in swarms:
+            swarms[sid].peer_count = len(self._swarm_nodes.get(sid, set()))
+        return [s.to_dict() for s in swarms.values()]
+
+    def get_manifest(self, swarm_id: str) -> Optional[dict]:
+        return self._manifests.get(swarm_id)
+
     def get_dashboard_snapshot(self) -> Dict[str, Any]:
         self._refresh_session()
         return {
@@ -345,6 +394,7 @@ class TelemetryStore:
                 "nodes": self.get_nodes(),
                 "edges": [edge.to_dict() for edge in self._edges.values()],
                 "stats": self.get_network_stats(),
+                "swarms": self.get_swarms(),
             },
         }
 
