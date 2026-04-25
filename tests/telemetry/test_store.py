@@ -595,6 +595,28 @@ def test_ingest_event_node_started_without_manifest_sets_swarm_fields_and_swarm_
     assert store.get_manifest("swarm-1") is None
 
 
+def test_dashboard_snapshot_includes_swarms_in_network_section():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "swarm_name": "Alpha Swarm",
+        "manifest_hash": "hash-abc",
+        "aggregation_name": "FedAvg",
+        "topology_name": "Ring",
+    })
+
+    snapshot = store.get_dashboard_snapshot()
+
+    assert "swarms" in snapshot["network"]
+    swarms = snapshot["network"]["swarms"]
+    assert len(swarms) == 1
+    assert swarms[0]["swarm_id"] == "swarm-1"
+    assert swarms[0]["swarm_name"] == "Alpha Swarm"
+
+
 def test_ingest_heartbeat_caches_manifest_when_present():
     store = TelemetryStore(session_id="session-1")
     store.ingest_heartbeat({
