@@ -189,6 +189,8 @@ class TestIdentityBinding:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -227,6 +229,8 @@ class TestIdentityBinding:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -265,6 +269,8 @@ class TestRequireSignaturePolicy:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -300,6 +306,8 @@ class TestRequireSignaturePolicy:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -326,7 +334,7 @@ class TestRequireSignaturePolicy:
             chunk_data=b"\x00" * 10,
         )
 
-        await GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
 
         assert community._chunk_buffers == {}
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
@@ -340,6 +348,8 @@ class TestRequireSignaturePolicy:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -373,6 +383,8 @@ class TestIPv8SecurityEvents:
         community = MagicMock(spec=GossipLearningCommunity)
         community._last_seen_round = {}
         community._chunk_buffers = {}
+
+        community._recent_chunks = {}
         community.known_peers = {}
         community._mid_to_node_id = {}
         community._heartbeat_sequence = 0
@@ -388,6 +400,20 @@ class TestIPv8SecurityEvents:
         community._persist_last_seen_round_state = GossipLearningCommunity._persist_last_seen_round_state.__get__(community)
         community._record_last_seen_round = GossipLearningCommunity._record_last_seen_round.__get__(community)
         community._get_local_round = GossipLearningCommunity._get_local_round.__get__(community)
+        community.metrics = {
+            'chunk_transfers_started': 0,
+            'chunk_transfers_completed': 0,
+            'chunk_transfers_failed_timeout': 0,
+            'chunk_transfers_rejected_peer_limit': 0,
+            'nacks_sent': 0,
+            'nacks_received': 0,
+            'nacks_ignored_budget': 0,
+            'chunks_resent': 0,
+        }
+        community._nack_transfer_buckets = {}
+        community._inflight_transfers = {}
+        community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
+        community._dispatch_model_update = GossipLearningCommunity.on_model_update.__get__(community)
         return community
 
     @pytest.mark.asyncio
@@ -518,7 +544,7 @@ class TestIPv8SecurityEvents:
             signature=b"bad",
         )
 
-        await GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
+        GossipLearningCommunity._dispatch_model_chunk(community, peer, payload)
 
         emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
         assert emitted == ["security.signature_rejected", "ipv8_payload_dropped"]

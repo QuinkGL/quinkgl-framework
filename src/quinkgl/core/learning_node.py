@@ -74,7 +74,8 @@ class LearningNode:
         storage_dir: Optional[str] = None,
         gossip_interval: float = 60.0,
         training_config: Optional[TrainingConfig] = None,
-        min_peers_before_aggregate: int = 1
+        min_peers_before_aggregate: int = 1,
+        stale_round_tolerance: int = 10,
     ):
         """
         Initialize a LearningNode.
@@ -90,6 +91,7 @@ class LearningNode:
             gossip_interval: Seconds between gossip rounds
             training_config: Configuration for local training
             min_peers_before_aggregate: Minimum pending updates before aggregation
+            stale_round_tolerance: Maximum round gap for accepted updates
         """
         self.peer_id = peer_id
         self.domain = domain
@@ -120,6 +122,7 @@ class LearningNode:
             gossip_interval=gossip_interval,
             training_config=training_config,
             min_peers_before_aggregate=min_peers_before_aggregate,
+            stale_round_tolerance=stale_round_tolerance,
             model_store=self.model_store,
         )
 

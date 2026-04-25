@@ -56,6 +56,12 @@ def build_parser(sub: _SubParsersAction) -> None:
         default=None,
         help="Seconds to wait for peer updates before aggregating (default: 60)",
     )
+    parser.add_argument(
+        "--stale-round-tolerance",
+        type=int,
+        default=None,
+        help="Max |msg_round - local_round| to accept an update (default: 10)",
+    )
     parser.add_argument("--telemetry-url", default=None)
     parser.add_argument("--telemetry-secret", default=None)
     parser.add_argument("--telemetry-heartbeat-interval", type=float, default=5.0)
@@ -355,6 +361,14 @@ async def _async_run(args: argparse.Namespace) -> int:
 
     # 4. Construct GossipNode
     try:
+        stale_tolerance = args.stale_round_tolerance
+        if stale_tolerance is None:
+            stale_tolerance = getattr(
+                getattr(manifest, "data_policy", None),
+                "stale_round_tolerance",
+                10,
+            )
+
         node = GossipNode(
             node_id=node_id,
             manifest=manifest,
@@ -371,6 +385,7 @@ async def _async_run(args: argparse.Namespace) -> int:
                 if args.gossip_interval is not None
                 else 60.0
             ),
+            stale_round_tolerance=stale_tolerance,
         )
     except Exception as exc:
         log.error("Failed to construct GossipNode: %s", exc)

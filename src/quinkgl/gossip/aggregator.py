@@ -47,7 +47,7 @@ class ModelAggregator:
         consensus_threshold: float = 0.5,
         consensus_loss_tolerance: float = 0.05,
         convergence_config: Optional[ConvergenceConfig] = None,
-        stale_round_tolerance: int = 2,
+        stale_round_tolerance: int = 10,
         min_peers_for_consensus: int = 3,
         max_round_ahead: int = 50,
         max_pending_updates: int = 1024,
@@ -441,7 +441,6 @@ class ModelAggregator:
             message: The received message
         """
         if not self._protocol.validate_message(message):
-            logger.debug(f"Dropping invalid message from {message.sender_id}")
             return
 
         if message.msg_type == MessageType.MODEL_UPDATE:
@@ -475,9 +474,6 @@ class ModelAggregator:
         """
         # A4: refuse appends once the loop has stopped
         if not self.running:
-            logger.debug(
-                f"Dropping update from {message.sender_id}: loop not running"
-            )
             return
 
         await self._execute_hooks("after_receive", message)
@@ -556,6 +552,10 @@ class ModelAggregator:
                 dropped_due_to_backpressure = True
             else:
                 self.pending_updates.append(update)
+                logger.info(
+                    f"AGG_APPENDED from={message.sender_id} round={message.round_number} "
+                    f"pending={len(self.pending_updates)}"
+                )
 
         if dropped_due_to_backpressure:
             logger.warning(
@@ -883,15 +883,6 @@ class ModelAggregator:
             # updates arriving during aggregation are safely appended.
             batch = list(self.pending_updates)
             self.pending_updates.clear()
-
-        # Belt-and-braces: filter the batch against current_round one more
-        # time, in case round incremented between append and drain.
-        batch = [
-            u for u in batch
-            if abs(u.round_number - self.current_round) <= self.stale_round_tolerance
-        ]
-        if not batch:
-            return None
 
         self._aggregating = True
         try:
@@ -1228,7 +1219,7 @@ class ModelAggregator:
                                 f"Consensus reached at round {result.checkpoint_round}: "
                                 f"{result.agreeing_peers}/{result.total_peers} peers agree"
                             )
-                        await self.consensus_tracker.prune_old_checkpoints()
+                        self.consensus_tracker.prune_old_checkpoints()
 
                     round_duration = (datetime.now() - round_start_time).total_seconds()
 

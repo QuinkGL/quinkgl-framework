@@ -30,6 +30,18 @@ def _make_peer(mid_hex: str):
 def _make_community():
     community = MagicMock(spec=GossipLearningCommunity)
     community._chunk_buffers = {}
+    community._recent_chunks = {}
+    community._completed_chunk_transfers = {}
+    community.metrics = {
+        'chunk_transfers_started': 0,
+        'chunk_transfers_completed': 0,
+        'chunk_transfers_failed_timeout': 0,
+        'chunk_transfers_rejected_peer_limit': 0,
+        'nacks_sent': 0,
+        'nacks_received': 0,
+        'nacks_ignored_budget': 0,
+        'chunks_resent': 0,
+    }
     community.known_peers = {}
     community._heartbeat_sequence = 0
     community.node_id = "local"
@@ -37,6 +49,8 @@ def _make_community():
     community._last_seen_round = {}
     community._mid_to_node_id = {}
     community.require_signature = False
+    community.max_round_skip = 1000
+    community.current_round_provider = lambda: 0
     return community
 
 
@@ -63,7 +77,7 @@ class TestMaxChunksPerTransfer:
         peer = _make_peer("aa" * 20)
         p = _payload("t1", "p1", total_chunks=MAX_CHUNKS_PER_TRANSFER + 1)
 
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -75,7 +89,7 @@ class TestMaxChunksPerTransfer:
         peer = _make_peer("aa" * 20)
         p = _payload("t1", "p1", total_chunks=MAX_CHUNKS_PER_TRANSFER)
 
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -100,7 +114,7 @@ class TestPerPeerTransferLimit:
 
         # This one should be rejected
         p = _payload("transfer-overflow", "p1")
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -125,7 +139,7 @@ class TestGlobalTransferLimit:
 
         peer = _make_peer("cc" * 20)
         p = _payload("overflow", "new-node")
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 
@@ -151,7 +165,7 @@ class TestPerPeerByteBudget:
 
         # New transfer should be rejected
         p = _payload("new-t", "p1")
-        await GossipLearningCommunity._dispatch_model_chunk(
+        GossipLearningCommunity._dispatch_model_chunk(
             community, peer, p
         )
 

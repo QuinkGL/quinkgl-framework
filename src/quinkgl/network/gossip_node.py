@@ -265,6 +265,7 @@ class GossipNode:
         enable_fallback: bool = True,
         fallback_timeout: float = 30.0,
         min_peers_before_aggregate: int = 1,
+        stale_round_tolerance: int = 10,
         data_policy: Optional[Any] = None,
         fingerprint: Optional[Any] = None,
         require_signature: bool = True,
@@ -307,6 +308,7 @@ class GossipNode:
             enable_fallback: Enable tunnel fallback when IPv8 fails
             fallback_timeout: Seconds to wait for IPv8 before fallback
             min_peers_before_aggregate: Minimum updates before aggregation
+            stale_round_tolerance: Maximum round gap for accepted updates
             quiet: If True, no default TerminalObserver is attached.
                 Events are still emitted and can be consumed by custom observers.
         """
@@ -464,7 +466,8 @@ class GossipNode:
             data_schema_hash=self.data_schema_hash,
             gossip_interval=gossip_interval,
             training_config=training_config,
-            min_peers_before_aggregate=min_peers_before_aggregate
+            min_peers_before_aggregate=min_peers_before_aggregate,
+            stale_round_tolerance=stale_round_tolerance,
         )
 
         # IPv8 manager

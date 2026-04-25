@@ -38,25 +38,28 @@ MAX_INCOMING_MESSAGE_SIZE = 150 * 1024 * 1024
 CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
 
 # B7: Inter-chunk send delay (seconds) — prevents UDP buffer overflow on receiver.
-# At 1 KB/chunk this yields ~83 KB/s sustained throughput.
-CHUNK_SEND_INTERVAL = 0.012
+# v3: Increased from 0.012 to 0.025 to handle aggregate ingress from multiple
+# simultaneous senders in a 5-peer swarm (4 senders × 40 KB/s ≈ 160 KB/s).
+CHUNK_SEND_INTERVAL = 0.025
 
 # Timeout for incomplete transfers (300 seconds - increased for Colab/slow networks)
 CHUNK_TRANSFER_TIMEOUT = 300
 
 # B4: Chunk-buffer memory caps to prevent DoS
-MAX_CONCURRENT_TRANSFERS_PER_PEER = 3
+MAX_CONCURRENT_TRANSFERS_PER_PEER = 8
 MAX_TOTAL_TRANSFERS = 50
 MAX_BUFFERED_BYTES_PER_PEER = 200 * 1024 * 1024  # 200 MB
 MAX_CHUNKS_PER_TRANSFER = 300_000  # ~300 MB at 1 KB/chunk
 
 # B5: NACK rate-limiting
-NACK_MAX_RESENDS_PER_TRANSFER = 3
-NACK_BUCKET_INTERVAL = 10.0  # seconds — refill one token per interval
-NACK_BUCKET_MAX_TOKENS = 5   # max burst per peer
+NACK_MAX_RESENDS_PER_TRANSFER = 6
+NACK_BUCKET_INTERVAL = 5.0   # seconds — refill one token per interval
+NACK_BUCKET_MAX_TOKENS = 10  # max burst per peer
+NACK_TRANSFER_BUCKET_MAX_TOKENS = 6
+NACK_TRANSFER_BUCKET_INTERVAL = 5.0
 
 # B6: Early NACK gap detection
-EARLY_NACK_AGE_THRESHOLD = 5.0  # seconds since buffer creation before probing
+EARLY_NACK_AGE_THRESHOLD = 18.0  # seconds — allow most chunks to arrive naturally
 
 # B16 §4.8: Hard byte cap on fingerprint JSON in discovery announcements
 MAX_FINGERPRINT_BYTES = 8192  # 8 KB
@@ -738,10 +741,35 @@ class GossipLearningCommunity(Community):
         self._nack_resend_counts: Dict[str, int] = {}
         # peer_mid -> { 'tokens': float, 'last_refill': float }
         self._nack_buckets: Dict[str, Dict] = {}
+        # v3: per-transfer NACK bucket so transfer A does not starve transfer B
+        # transfer_id -> { 'tokens': float, 'last_refill': float }
+        self._nack_transfer_buckets: Dict[str, Dict] = {}
+
+        # v3: Sender-side idempotency — (receiver_node_id, round_number, model_hash) -> transfer_id
+        self._inflight_transfers: Dict[tuple[str, int, str], str] = {}
+
+        # v3: Completed-transfer registry for replay protection (separate from last_seen_round)
+        self._completed_chunk_transfers: Dict[tuple[str, str], float] = {}
+
+        # v3: Production metrics
+        self.metrics = {
+            'chunk_transfers_started': 0,
+            'chunk_transfers_completed': 0,
+            'chunk_transfers_failed_timeout': 0,
+            'chunk_transfers_rejected_peer_limit': 0,
+            'nacks_sent': 0,
+            'nacks_received': 0,
+            'nacks_ignored_budget': 0,
+            'chunks_resent': 0,
+        }
 
         # B15: Replay protection — per-peer last seen round
         self._last_seen_round: Dict[str, int] = {}
         self._load_last_seen_round_state()
+
+        # v3: Semantic chunk dedup — protects against non-deterministic IPv8
+        # signatures that cause NACK resends to appear as distinct packets.
+        self._recent_chunks: Dict[tuple[str, int], float] = {}
 
         # Message handlers
         self.add_message_handler(DiscoveryAnnouncePayload, self.on_discovery_announce)
@@ -781,6 +809,56 @@ class GossipLearningCommunity(Community):
         logger.debug(f"   Domain: {self.domain}")
         logger.debug(f"   Schema: {self.data_schema_hash}")
         logger.debug(f"   My peer: {self.my_peer.address}")
+
+        # v3: Enlarge UDP socket buffers to prevent kernel-level drops
+        # under aggregate ingress from multiple simultaneous senders.
+        # NOTE: moved from __init__ because self.endpoint is only wired
+        # after community construction in IPv8.
+        if not getattr(self, '_socket_buffers_resized', False):
+            SO_RCVBUF_SIZE = 8 * 1024 * 1024   # 8 MB
+            SO_SNDBUF_SIZE = 4 * 1024 * 1024   # 4 MB
+            udp_socket = None
+            # IPv8 stores socket via: self.endpoint._transport._sock
+            endpoint = getattr(self, 'endpoint', None)
+            if endpoint is not None:
+                # Try direct _socket / socket attributes first (raw / simple endpoints)
+                udp_socket = getattr(endpoint, '_socket', None)
+                if udp_socket is None:
+                    udp_socket = getattr(endpoint, 'socket', None)
+                # IPv8 UDPEndpoint: _transport is asyncio DatagramTransport, _sock lives inside
+                if udp_socket is None:
+                    transport = getattr(endpoint, '_transport', None)
+                    if transport is not None:
+                        udp_socket = getattr(transport, '_sock', None)
+                # IPv8 DispatcherEndpoint: delegates to sub-interfaces (e.g. UDPIPv4)
+                if udp_socket is None and type(endpoint).__name__ == 'DispatcherEndpoint':
+                    preferred = getattr(endpoint, '_preferred_interface', None)
+                    if preferred is not None:
+                        transport = getattr(preferred, '_transport', None)
+                        if transport is not None:
+                            udp_socket = getattr(transport, '_sock', None)
+                    if udp_socket is None:
+                        for iface in getattr(endpoint, 'interfaces', {}).values():
+                            transport = getattr(iface, '_transport', None)
+                            if transport is not None:
+                                udp_socket = getattr(transport, '_sock', None)
+                                if udp_socket is not None:
+                                    break
+            if udp_socket is None:
+                udp_socket = getattr(self, '_socket', None)
+            if udp_socket is not None:
+                try:
+                    import socket as _socket
+                    udp_socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF, SO_RCVBUF_SIZE)
+                    udp_socket.setsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF, SO_SNDBUF_SIZE)
+                    actual_rcv = udp_socket.getsockopt(_socket.SOL_SOCKET, _socket.SO_RCVBUF)
+                    actual_snd = udp_socket.getsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF)
+                    logger.info(f"UDP socket buffers resized: RCVBUF={actual_rcv}, SNDBUF={actual_snd}")
+                    self._socket_buffers_resized = True
+                except OSError as exc:
+                    logger.warning(f"Failed to resize UDP socket buffers: {exc}")
+            else:
+                logger.warning("UDP socket not found; buffer resize skipped")
 
         # Start periodic announcements
         self.register_task(
@@ -971,6 +1049,36 @@ class GossipLearningCommunity(Community):
                 f"Removed stale transfer {buffer.transfer_id[:8]}... from {buffer.sender_id}: "
                 f"only {len(buffer.chunks)}/{buffer.total_chunks} chunks received"
             )
+            self.metrics['chunk_transfers_failed_timeout'] += 1
+
+        # v3: Purge expired completed-transfer entries (TTL = 10 min)
+        COMPLETED_TRANSFER_TTL = 600
+        now = time.time()
+        expired_completed = [
+            key for key, ts in list(self._completed_chunk_transfers.items())
+            if now - ts > COMPLETED_TRANSFER_TTL
+        ]
+        for key in expired_completed:
+            del self._completed_chunk_transfers[key]
+
+        # v3: Purge expired recent-chunk entries (TTL = 2 min)
+        RECENT_CHUNK_TTL = 120
+        expired_recent = [
+            key for key, ts in list(self._recent_chunks.items())
+            if now - ts > RECENT_CHUNK_TTL
+        ]
+        for key in expired_recent:
+            del self._recent_chunks[key]
+
+        # v3: Emit metrics summary at DEBUG level every cleanup cycle
+        logger.debug(
+            f"[metrics] started={self.metrics['chunk_transfers_started']} "
+            f"completed={self.metrics['chunk_transfers_completed']} "
+            f"timeout={self.metrics['chunk_transfers_failed_timeout']} "
+            f"peer_limit={self.metrics['chunk_transfers_rejected_peer_limit']} "
+            f"nacks_sent={self.metrics['nacks_sent']} nacks_rcvd={self.metrics['nacks_received']} "
+            f"nacks_ignored={self.metrics['nacks_ignored_budget']} resent={self.metrics['chunks_resent']}"
+        )
 
     async def _cleanup_outgoing_cache(self):
         """Remove old outgoing transfers from cache."""
@@ -982,6 +1090,14 @@ class GossipLearningCommunity(Community):
         ]
         for tid in expired:
             del self._outgoing_transfers[tid]
+
+        # v3: Also purge orphaned per-transfer NACK buckets and inflight entries
+        for tid in list(self._nack_transfer_buckets.keys()):
+            if tid not in self._outgoing_transfers:
+                del self._nack_transfer_buckets[tid]
+        for inflight_key, tid in list(self._inflight_transfers.items()):
+            if tid not in self._outgoing_transfers:
+                del self._inflight_transfers[inflight_key]
 
     async def _nack_incomplete_buffers(self):
         """Proactively NACK incomplete buffers older than threshold."""
@@ -1001,10 +1117,18 @@ class GossipLearningCommunity(Community):
             if not missing:
                 continue
 
+            # v3: Check per-transfer bucket first, then per-peer bucket
+            if not self._nack_try_consume_transfer(transfer_id):
+                logger.debug(
+                    f"Early-NACK rate-limited for transfer {transfer_id[:8]}..."
+                )
+                self.metrics['nacks_ignored_budget'] += 1
+                continue
             if not self._nack_try_consume(peer_mid):
                 logger.debug(
                     f"Early-NACK rate-limited for peer {peer_mid[:16]}..."
                 )
+                self.metrics['nacks_ignored_budget'] += 1
                 continue
 
             target_peer = None
@@ -1028,6 +1152,7 @@ class GossipLearningCommunity(Community):
                 f"for {transfer_id[:8]}... (age={age:.1f}s)"
             )
             self.ez_send(target_peer, req_payload)
+            self.metrics['nacks_sent'] += 1
 
     @lazy_wrapper(DiscoveryAnnouncePayload)
     async def on_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
@@ -1297,6 +1422,9 @@ class GossipLearningCommunity(Community):
         except Exception:
             pass
 
+    # Backward compatibility alias for older tests
+    _dispatch_model_update = on_model_update.__wrapped__
+
     @lazy_wrapper(HeartbeatPayload)
     async def on_heartbeat(self, peer: Peer, payload: HeartbeatPayload):
         """Handle heartbeat message."""
@@ -1391,6 +1519,30 @@ class GossipLearningCommunity(Community):
             return True
         return False
 
+    def _nack_try_consume_transfer(self, transfer_id: str) -> bool:
+        """v3: Per-transfer token-bucket rate limiter for NACK handling.
+
+        Returns True if the request is allowed (a token was consumed).
+        """
+        now = time.time()
+        bucket = self._nack_transfer_buckets.get(transfer_id)
+        if bucket is None:
+            bucket = {"tokens": NACK_TRANSFER_BUCKET_MAX_TOKENS, "last_refill": now}
+            self._nack_transfer_buckets[transfer_id] = bucket
+
+        elapsed = now - bucket["last_refill"]
+        refill = elapsed / NACK_TRANSFER_BUCKET_INTERVAL
+        if refill > 0:
+            bucket["tokens"] = min(
+                bucket["tokens"] + refill, NACK_TRANSFER_BUCKET_MAX_TOKENS
+            )
+            bucket["last_refill"] = now
+
+        if bucket["tokens"] >= 1.0:
+            bucket["tokens"] -= 1.0
+            return True
+        return False
+
     @lazy_wrapper(RequestChunksPayload)
     async def on_request_chunks(self, peer: Peer, payload: RequestChunksPayload):
         """
@@ -1406,6 +1558,7 @@ class GossipLearningCommunity(Community):
             f"Chunk request received from {payload.sender_id} "
             f"(transfer={tid[:8]}...)"
         )
+        self.metrics['nacks_received'] += 1
 
         if tid not in self._outgoing_transfers:
             logger.warning(f"Request for unknown/expired transfer {tid} from {payload.sender_id}")
@@ -1561,13 +1714,55 @@ class GossipLearningCommunity(Community):
 
         # B5: Increment resend counter
         self._nack_resend_counts[tid] = resend_count + 1
+        self.metrics['chunks_resent'] += len(valid_indices)
+
+    # Backward compatibility alias for older tests
+    _dispatch_request_chunks = on_request_chunks.__wrapped__
+
+    async def _process_completed_model(
+        self,
+        sender_id: str,
+        weights: Any,
+        sample_count: int,
+        round_number: int,
+        loss: float,
+        accuracy: float,
+        peer_mid: str,
+        transfer_id: str,
+    ) -> None:
+        """Async callback invocation for completed model transfers."""
+        logger.info(f"CALLBACK_FIRED sender={sender_id} round={round_number}")
+        try:
+            await self.on_model_update_callback(
+                sender_id=sender_id,
+                weights=weights,
+                sample_count=sample_count,
+                round_number=round_number,
+                loss=loss,
+                accuracy=accuracy
+            )
+            logger.info(f"Model update callback COMPLETED for {sender_id}")
+        except Exception as cb_err:
+            logger.exception(
+                f"Model update callback FAILED for {sender_id}: {cb_err}"
+            )
+            _emit_ipv8_payload_dropped(
+                self,
+                f"callback error: {cb_err}",
+                sender_id=sender_id,
+                peer_mid=peer_mid,
+                transport="chunk",
+                transfer_id=transfer_id,
+            )
 
     @lazy_wrapper(ModelChunkPayload)
-    async def on_model_chunk(self, peer: Peer, payload: ModelChunkPayload):
+    def on_model_chunk(self, peer: Peer, payload: ModelChunkPayload):
         """
         Handle incoming model chunk.
-        
+
         Buffers chunks and triggers model processing when all chunks are received.
+        NOTE: made synchronous to avoid event-loop task backlog that caused
+        hundreds of late chunks to be rejected after transfer completion.
         """
         if payload.chunk_index % 50 == 0:
             logger.debug(
@@ -1647,6 +1842,15 @@ class GossipLearningCommunity(Community):
                 f"from {payload.sender_id} (no signature)"
             )
 
+        # v3: Semantic dedup — IPv8 signatures are non-deterministic, so NACK
+        # resends appear as distinct packets. Drop duplicates silently here.
+        # NOTE: key includes peer_mid so transfers from different peers are
+        # not confused (B3: buffer is already keyed by peer_mid + transfer_id).
+        chunk_key = (peer_mid, transfer_id, payload.chunk_index)
+        if chunk_key in self._recent_chunks:
+            return
+        self._recent_chunks[chunk_key] = time.time()
+
         # B4: Validate total_chunks before any allocation
         if payload.total_chunks > MAX_CHUNKS_PER_TRANSFER:
             logger.warning(
@@ -1687,24 +1891,21 @@ class GossipLearningCommunity(Community):
 
         # B4: Enforce per-peer and global buffer caps on new buffer creation
         if buf_key not in self._chunk_buffers:
-            # B15: Replay protection for chunked transfers
-            last_round = self._last_seen_round.get(peer_mid, -1)
-            if payload.round_number <= last_round:
-                logger.warning(
-                    f"Rejected chunked transfer {transfer_id[:8]}... from "
-                    f"{payload.sender_id}: round {payload.round_number} "
-                    f"<= last seen {last_round}"
+            # v3: Transfer-based replay protection (not round-based)
+            if (peer_mid, transfer_id) in self._completed_chunk_transfers:
+                logger.debug(
+                    f"Rejected duplicate completed transfer {transfer_id[:8]}... from "
+                    f"{payload.sender_id} (chunk {payload.chunk_index})"
                 )
+                self.metrics['chunk_transfers_rejected_peer_limit'] += 1
                 _emit_ipv8_payload_dropped(
                     self,
-                    "replayed round",
+                    "duplicate completed transfer",
                     sender_id=payload.sender_id,
                     peer_mid=peer_mid,
-                    security_event="security.replay_rejected",
+                    security_event="security.duplicate_chunk_transfer",
                     transport="chunk",
                     transfer_id=transfer_id,
-                    round_number=payload.round_number,
-                    last_round=last_round,
                 )
                 return
 
@@ -1717,6 +1918,7 @@ class GossipLearningCommunity(Community):
                     f"Rejected transfer {transfer_id[:8]}... from {payload.sender_id}: "
                     f"per-peer limit ({MAX_CONCURRENT_TRANSFERS_PER_PEER}) reached"
                 )
+                self.metrics['chunk_transfers_rejected_peer_limit'] += 1
                 _emit_ipv8_payload_dropped(
                     self,
                     "per-peer transfer limit reached",
@@ -1764,23 +1966,11 @@ class GossipLearningCommunity(Community):
                 )
                 return
 
-        # Log chunk receipt with visible print statements
-        if payload.chunk_index == 0:
-            logger.debug(
-                f"Chunk reception started from {payload.sender_id} "
-                f"({payload.total_chunks} chunks)"
-            )
-            logger.debug(
-                f"Receiving chunked model from {payload.sender_id} "
-                f"(transfer={transfer_id[:8]}..., chunks={payload.total_chunks}, "
-                f"round={payload.round_number})"
-            )
-        elif (payload.chunk_index + 1) % 50 == 0 or payload.chunk_index == payload.total_chunks - 1:
-            progress = (payload.chunk_index + 1) / payload.total_chunks * 100
-            logger.debug(
-                f"Chunk progress from {payload.sender_id}: "
-                f"{payload.chunk_index + 1}/{payload.total_chunks} ({progress:.0f}%)"
-            )
+        # Log chunk receipt
+        logger.debug(
+            f"CHUNK_RECV tid={transfer_id[:8]} idx={payload.chunk_index} total={payload.total_chunks} "
+            f"from={payload.sender_id}"
+        )
         
         if payload.chunk_index == payload.total_chunks - 1:
             logger.debug(f"Received final chunk {payload.chunk_index + 1}/{payload.total_chunks} from {payload.sender_id}")
@@ -1791,6 +1981,7 @@ class GossipLearningCommunity(Community):
                 f"Created chunk buffer {transfer_id[:8]}... "
                 f"starting at chunk {payload.chunk_index}"
             )
+            self.metrics['chunk_transfers_started'] += 1
             self._chunk_buffers[buf_key] = ChunkBuffer(
                 transfer_id=transfer_id,
                 sender_id=payload.sender_id,
@@ -1825,14 +2016,14 @@ class GossipLearningCommunity(Community):
             logger.debug(
                 f"All {payload.total_chunks} chunks received from {payload.sender_id}, reassembling..."
             )
-            
+
             try:
                 # Reassemble the complete weights
                 weights_bytes = buffer.reassemble()
-                
-                # Remove buffer
+
+                # Remove buffer BEFORE scheduling callback to avoid race
                 del self._chunk_buffers[buf_key]
-                
+
                 # Check size
                 if len(weights_bytes) > MAX_INCOMING_MESSAGE_SIZE:
                     logger.error(
@@ -1865,56 +2056,43 @@ class GossipLearningCommunity(Community):
                         transfer_id=transfer_id,
                     )
                     return
-                
+
                 logger.debug(
                     f"Received model update from {payload.sender_id} "
                     f"(round={buffer.round_number}, samples={buffer.sample_count}, "
                     f"size={len(weights_bytes) / 1024:.1f} KB, chunks={payload.total_chunks})"
                 )
-                
-                # Call callback
+
+                # Mark completed IMMEDIATELY so late chunks are rejected cleanly
+                self.metrics['chunk_transfers_completed'] += 1
+                self._completed_chunk_transfers[(peer_mid, transfer_id)] = time.time()
+                try:
+                    GossipLearningCommunity._persist_last_seen_round_state(self)
+                except Exception:
+                    pass
+
+                # Schedule async callback so packet handler stays synchronous
                 if self.on_model_update_callback:
                     logger.debug(
-                        f"Model reassembly complete for {payload.sender_id}; invoking callback"
+                        f"Model reassembly complete for {payload.sender_id}; scheduling callback"
                     )
-                    try:
-                        await self.on_model_update_callback(
+                    asyncio.create_task(
+                        self._process_completed_model(
                             sender_id=payload.sender_id,
                             weights=weights,
                             sample_count=buffer.sample_count,
                             round_number=buffer.round_number,
                             loss=buffer.loss,
-                            accuracy=buffer.accuracy
-                        )
-                        logger.debug(
-                            f"Model update callback completed for {payload.sender_id}"
-                        )
-                    except Exception as cb_err:
-                        logger.exception(
-                            f"Model update callback failed for {payload.sender_id}: {cb_err}"
-                        )
-                        _emit_ipv8_payload_dropped(
-                            self,
-                            f"callback error: {cb_err}",
-                            sender_id=payload.sender_id,
+                            accuracy=buffer.accuracy,
                             peer_mid=peer_mid,
-                            transport="chunk",
                             transfer_id=transfer_id,
                         )
-                        return
+                    )
                 else:
                     logger.warning(
                         f"No model update callback registered for transfer {transfer_id[:8]}..."
                     )
-                self._last_seen_round[peer_mid] = max(
-                    self._last_seen_round.get(peer_mid, -1),
-                    int(buffer.round_number),
-                )
-                try:
-                    GossipLearningCommunity._persist_last_seen_round_state(self)
-                except Exception:
-                    pass
-                    
+
             except Exception as e:
                 logger.error(f"Failed to reassemble/process chunked model from {payload.sender_id}: {e}")
                 _emit_ipv8_payload_dropped(
@@ -1940,23 +2118,27 @@ class GossipLearningCommunity(Community):
                     f"Missing chunk indices for {transfer_id[:8]}... "
                     f"(first 10): {missing[:10]} (total={len(missing)})"
                 )
-                
+
                 # Send NACK (RequestChunksPayload)
                 import struct
                 # Pack indices as unsigned ints
                 missing_bytes = struct.pack(f'{len(missing)}I', *missing)
-                
+
                 req_payload = RequestChunksPayload(
                     transfer_id=transfer_id,
                     sender_id=self.node_id,
                     missing_indices_bytes=missing_bytes
                 )
-                
+
                 # Send request
                 logger.debug(
                     f"Requesting {len(missing)} missing chunks for {transfer_id[:8]}..."
                 )
                 self.ez_send(peer, req_payload)
+                self.metrics['nacks_sent'] += 1
+
+    # Backward compatibility alias for older tests
+    _dispatch_model_chunk = on_model_chunk.__wrapped__
 
     async def send_model_update(
         self,
@@ -2028,7 +2210,19 @@ class GossipLearningCommunity(Community):
                 logger.debug(f"Sent model update to {target_node_id} ({len(weights_bytes)} bytes)")
             else:
                 # Large payload - use chunked transfer
+                # v3: Sender-side idempotency — same (peer, round, model) gets same transfer_id
+                model_hash = hashlib.sha256(weights_bytes).hexdigest()[:16]
+                inflight_key = (target_node_id, round_number, model_hash)
+                existing_tid = self._inflight_transfers.get(inflight_key)
+                if existing_tid is not None and existing_tid in self._outgoing_transfers:
+                    logger.info(
+                        f"Skipping duplicate send to {target_node_id}: "
+                        f"transfer {existing_tid[:8]}... already in-flight for round {round_number}"
+                    )
+                    return True
+
                 transfer_id = str(uuid.uuid4())
+                self._inflight_transfers[inflight_key] = transfer_id
                 total_chunks = (len(weights_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
                 timestamp = int(time.time())
                 
@@ -2101,6 +2295,8 @@ class GossipLearningCommunity(Community):
                         await asyncio.sleep(CHUNK_SEND_INTERVAL)
                 
                 logger.debug(f"Sent {total_chunks} chunks to {target_node_id}")
+                # v3: Remove from inflight tracking once all chunks are dispatched
+                self._inflight_transfers.pop(inflight_key, None)
             
             return True
 

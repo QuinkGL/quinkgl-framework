@@ -48,10 +48,14 @@ def run(args: argparse.Namespace) -> int:
 
 def _get_ipv8_version() -> str:
     try:
-        from ipv8 import __version__ as v
-        return v
+        from importlib.metadata import version
+        return version("pyipv8")
     except Exception:
-        return "unknown"
+        try:
+            from ipv8 import __version__ as v
+            return v
+        except Exception:
+            return "unknown"
 
 
 def _get_crypto_version() -> str:

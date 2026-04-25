@@ -299,7 +299,7 @@ class GossipProtocol:
             msg_epoch = message.timestamp.timestamp()
         except (AttributeError, OSError):
             return False
-        age = time.monotonic() - msg_epoch
+        age = time.time() - msg_epoch
         if age > self.MAX_MESSAGE_AGE_SECONDS:
             return False
         # Reject messages from the future (1 minute tolerance)
