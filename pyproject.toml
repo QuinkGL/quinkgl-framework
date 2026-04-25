@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quinkgl"
-version = "0.3.1"
+version = "0.3.2"
 description = "A decentralized gossip learning framework for P2P edge intelligence"
 readme = "README.md"
 authors = [
@@ -70,9 +70,9 @@ all = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework"
-"Bug Tracker" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework/issues"
-"Documentation" = "https://github.com/aliseyhann/QuinkGL-Gossip-Learning-Framework#readme"
+"Homepage" = "https://github.com/QuinkGL"
+"Bug Tracker" = "https://github.com/QuinkGL/quinkgl-framework/issues"
+"Documentation" = "https://github.com/QuinkGL/quinkgl-framework/blob/main/README.md"
 
 [tool.setuptools.package-data]
 "quinkgl.cli.templates" = ["**/*.tmpl"]
