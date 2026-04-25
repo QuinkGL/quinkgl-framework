@@ -499,7 +499,7 @@ def test_ingest_event_node_started_caches_manifest_and_sets_swarm_fields():
     swarms = store.get_swarms()
     assert len(swarms) == 1
     assert swarms[0]["swarm_id"] == "swarm-1"
-    assert swarms[0]["swarm_name"] == "Beta Swarm"
+    assert swarms[0]["swarm_name"] == "Beta"
     assert swarms[0]["peer_count"] == 1
     assert store.get_manifest("swarm-1") == {"name": "Beta", "round_limit": 10}
 
@@ -628,3 +628,25 @@ def test_ingest_heartbeat_caches_manifest_when_present():
     })
 
     assert store.get_manifest("swarm-1") == {"name": "Cached", "description": "from heartbeat"}
+
+
+def test_swarm_change_removes_node_from_old_swarm():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-a",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-b",
+    })
+
+    swarms = store.get_swarms()
+    by_id = {s["swarm_id"]: s for s in swarms}
+
+    assert by_id["swarm-a"]["peer_count"] == 0
+    assert by_id["swarm-b"]["peer_count"] == 1

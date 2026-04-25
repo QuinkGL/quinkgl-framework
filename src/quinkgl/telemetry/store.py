@@ -352,12 +352,12 @@ class TelemetryStore:
             if sid not in swarms:
                 swarms[sid] = SwarmSnapshot(
                     swarm_id=sid,
-                    swarm_name=node.swarm_name or manifest.get("name", "Unnamed swarm"),
+                    swarm_name=manifest.get("name") or node.swarm_name or "Unnamed swarm",
                     manifest_hash=node.manifest_hash or sid,
                     description=manifest.get("description", ""),
                     peer_count=0,
-                    aggregation_name=node.aggregation_name or manifest.get("aggregation", {}).get("name", ""),
-                    topology_name=node.topology_name or manifest.get("topology", {}).get("name", ""),
+                    aggregation_name=manifest.get("aggregation", {}).get("name") or node.aggregation_name or "",
+                    topology_name=manifest.get("topology", {}).get("name") or node.topology_name or "",
                     task_type=manifest.get("task", {}).get("type", ""),
                     input_shape=manifest.get("task", {}).get("input_shape", []),
                     output_shape=manifest.get("task", {}).get("output_shape", []),
@@ -367,6 +367,25 @@ class TelemetryStore:
                     domains=[],
                 )
             domain_sets[sid].add(node.domain)
+        for sid in self._swarm_nodes:
+            if sid not in swarms:
+                manifest = self._manifests.get(sid, {})
+                swarms[sid] = SwarmSnapshot(
+                    swarm_id=sid,
+                    swarm_name=manifest.get("name") or "Unnamed swarm",
+                    manifest_hash=manifest.get("manifest_hash") or sid,
+                    description=manifest.get("description", ""),
+                    peer_count=0,
+                    aggregation_name=manifest.get("aggregation", {}).get("name", ""),
+                    topology_name=manifest.get("topology", {}).get("name", ""),
+                    task_type=manifest.get("task", {}).get("type", ""),
+                    input_shape=manifest.get("task", {}).get("input_shape", []),
+                    output_shape=manifest.get("task", {}).get("output_shape", []),
+                    label_type=manifest.get("task", {}).get("label_type", ""),
+                    round_limit=manifest.get("round_limit"),
+                    created_at=manifest.get("created_at"),
+                    domains=[],
+                )
         for sid in swarms:
             swarms[sid].peer_count = len(self._swarm_nodes.get(sid, set()))
             swarms[sid].domains = list(domain_sets[sid])
@@ -405,9 +424,12 @@ class TelemetryStore:
         return node
 
     def _update_node_swarm_state(self, node: NodeSnapshot, data: Dict[str, Any]) -> None:
-        sid = data.get("swarm_id") or data.get("manifest_hash")
-        if sid:
-            node.swarm_id = sid
+        old_swarm_id = node.swarm_id
+        new_swarm_id = data.get("swarm_id") or data.get("manifest_hash")
+        if old_swarm_id and old_swarm_id != new_swarm_id:
+            self._swarm_nodes[old_swarm_id].discard(node.node_id)
+        if new_swarm_id:
+            node.swarm_id = new_swarm_id
         node.swarm_name = data.get("swarm_name") or node.swarm_name
         node.manifest_hash = data.get("manifest_hash") or node.manifest_hash
         node.aggregation_name = data.get("aggregation_name") or node.aggregation_name
