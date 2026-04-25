@@ -136,6 +136,8 @@ class TelemetryStore:
         node.topology_name = snapshot.get("topology_name") or node.topology_name
         if node.swarm_id:
             self._swarm_nodes[node.swarm_id].add(node_id)
+        if "manifest" in snapshot and node.swarm_id:
+            self._manifests[node.swarm_id] = snapshot["manifest"]
         node.refresh_uptime(timestamp)
         return self._broadcasts_for(node, None, None)
 
@@ -178,6 +180,11 @@ class TelemetryStore:
             if sid:
                 self._manifests[sid] = payload["manifest"]
                 self._swarm_nodes[sid].add(node_id)
+            node.swarm_id = payload.get("swarm_id") or node.swarm_id
+            node.swarm_name = payload.get("swarm_name") or node.swarm_name
+            node.manifest_hash = payload.get("manifest_hash") or node.manifest_hash
+            node.aggregation_name = payload.get("aggregation_name") or node.aggregation_name
+            node.topology_name = payload.get("topology_name") or node.topology_name
         event = NodeEvent(event_type=event_type, timestamp=timestamp, payload=dict(payload))
         node_events = self._events.setdefault(node_id, [])
         node_events.append(event)
@@ -486,6 +493,9 @@ class TelemetryStore:
             self._drop_node(oldest.node_id)
 
     def _drop_node(self, node_id: str) -> None:
+        node = self._nodes.get(node_id)
+        if node is not None and node.swarm_id:
+            self._swarm_nodes[node.swarm_id].discard(node_id)
         self._nodes.pop(node_id, None)
         self._events.pop(node_id, None)
         self._rounds.pop(node_id, None)
