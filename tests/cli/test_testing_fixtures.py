@@ -11,6 +11,28 @@ import pytest
 from quinkgl.testing import DummyDataLoader, local_swarm_fixture, make_dummy_manifest
 
 
+def _pyipv8_default_curve_supported() -> bool:
+    """pyipv8 ``medium`` keys may require OpenSSL curves dropped in newer cryptography builds."""
+    try:
+        from ipv8.keyvault.crypto import default_eccrypto
+
+        default_eccrypto.generate_key("medium")
+        return True
+    except Exception:
+        return False
+
+
+_IPV8_CURVE_OK = _pyipv8_default_curve_supported()
+
+_LOCAL_SWARM_SKIP = pytest.mark.skipif(
+    not _IPV8_CURVE_OK,
+    reason=(
+        "IPv8/pyipv8 default EC curve unsupported by this OpenSSL/cryptography "
+        "(e.g. sect409k1 on CI) — local_swarm_fixture needs real IPv8"
+    ),
+)
+
+
 class TestMakeDummyManifest:
     def test_defaults_validate(self) -> None:
         m = make_dummy_manifest()
@@ -30,6 +52,7 @@ class TestDummyDataLoader:
         assert count == 5
 
 
+@_LOCAL_SWARM_SKIP
 class TestLocalSwarmFixture:
     @pytest.mark.asyncio
     async def test_creates_three_peers(self) -> None:

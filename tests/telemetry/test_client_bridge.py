@@ -284,7 +284,7 @@ async def test_telemetry_client_posts_default_auth_header():
         auth_secret="secret-123",
     )
 
-    with patch("quinkgl.telemetry.client.httpx.AsyncClient", return_value=http_client):
+    with patch("quinkgl.telemetry.client.get_module_http_client", AsyncMock(return_value=http_client)):
         await client.send_heartbeat({"node_id": "node-a", "running": True})
 
     post.assert_awaited_once()
@@ -306,7 +306,7 @@ async def test_telemetry_client_posts_custom_auth_header():
         auth_header_name="X-Test-Telemetry-Secret",
     )
 
-    with patch("quinkgl.telemetry.client.httpx.AsyncClient", return_value=http_client):
+    with patch("quinkgl.telemetry.client.get_module_http_client", AsyncMock(return_value=http_client)):
         await client.send_event(
             RuntimeEvent(
                 event_type="training_completed",
@@ -419,12 +419,20 @@ async def test_telemetry_client_reuses_shared_http_client_and_closes_on_stop():
 
     client = TelemetryClient(base_url="http://telemetry.local")
 
-    with patch("quinkgl.telemetry.client.httpx.AsyncClient", return_value=http_client) as client_factory:
+    get_mod = AsyncMock(return_value=http_client)
+
+    async def close_shim():
+        await http_client.aclose()
+
+    with (
+        patch("quinkgl.telemetry.client.get_module_http_client", get_mod),
+        patch("quinkgl.telemetry.client.close_module_http_client", close_shim),
+    ):
         await client.send_heartbeat({"node_id": "node-a", "running": True})
         await client.send_heartbeat({"node_id": "node-a", "running": True})
         await client.stop()
 
-    assert client_factory.call_count == 1
+    assert get_mod.await_count == 2
     assert http_client.post.await_count == 2
     http_client.aclose.assert_awaited_once()
 

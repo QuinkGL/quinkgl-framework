@@ -12,7 +12,7 @@ No. QuinkGL is fully decentralized. Peers communicate directly with each other.
 
 ### What Python versions are supported?
 
-Python 3.9+.
+Python 3.10+.
 
 ## Manifests
 
