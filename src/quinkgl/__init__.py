@@ -45,7 +45,7 @@ from importlib.metadata import version as _package_version
 try:
     __version__ = _package_version("quinkgl")
 except _PackageNotFoundError:
-    __version__ = "0.3.1"
+    __version__ = "0.3.2"
 
 # =============================================================================
 # LOGGING — honour QUINKGL_LOG_LEVEL env-var (mirrors Flower's FLWR_LOG_LEVEL)

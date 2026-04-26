@@ -555,4 +555,4 @@ quinkgl info
 
 ---
 
-*Bu rehber QuinkGL v0.3.1 için yazılmıştır.*
+*Bu rehber QuinkGL v0.3.2 için yazılmıştır.*

@@ -112,6 +112,11 @@ class NodeSnapshot:
     chunked_transfers_received: int = 0
     resend_requests: int = 0
     send_failures: int = 0
+    swarm_id: Optional[str] = None
+    swarm_name: Optional[str] = None
+    manifest_hash: Optional[str] = None
+    aggregation_name: Optional[str] = None
+    topology_name: Optional[str] = None
     stale_updates: int = 0
     duplicate_updates: int = 0
     last_training_at: Optional[datetime] = None
@@ -164,4 +169,40 @@ class SessionSnapshot:
             "recent_aggregation_count": self.recent_aggregation_count,
             "active_domains": list(self.active_domains),
             "selected_node_id": self.selected_node_id,
+        }
+
+
+@dataclass
+class SwarmSnapshot:
+    swarm_id: str
+    swarm_name: str
+    manifest_hash: str
+    description: str
+    peer_count: int
+    aggregation_name: str
+    topology_name: str
+    task_type: str
+    input_shape: List[Any]
+    output_shape: List[Any]
+    label_type: str
+    round_limit: Optional[int]
+    created_at: Optional[str]
+    domains: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "swarm_id": self.swarm_id,
+            "swarm_name": self.swarm_name,
+            "manifest_hash": self.manifest_hash,
+            "description": self.description,
+            "peer_count": self.peer_count,
+            "aggregation_name": self.aggregation_name,
+            "topology_name": self.topology_name,
+            "task_type": self.task_type,
+            "input_shape": list(self.input_shape),
+            "output_shape": list(self.output_shape),
+            "label_type": self.label_type,
+            "round_limit": self.round_limit,
+            "created_at": self.created_at,
+            "domains": list(self.domains),
         }

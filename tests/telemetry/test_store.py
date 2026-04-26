@@ -450,3 +450,203 @@ def test_store_caps_peer_id_lists_to_latest_entries():
 
     assert node["peer_ids"] == ["node-c", "node-d"]
     assert node["known_peer_count"] == 2
+
+
+def test_ingest_heartbeat_sets_swarm_metadata():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "swarm_name": "Alpha Swarm",
+        "manifest_hash": "hash-abc",
+        "aggregation_name": "FedAvg",
+        "topology_name": "Ring",
+    })
+
+    node = store.get_node("node-a")
+
+    assert node["swarm_id"] == "swarm-1"
+    assert node["swarm_name"] == "Alpha Swarm"
+    assert node["manifest_hash"] == "hash-abc"
+    assert node["aggregation_name"] == "FedAvg"
+    assert node["topology_name"] == "Ring"
+
+
+def test_ingest_event_node_started_caches_manifest_and_sets_swarm_fields():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_event(
+        "node.started",
+        {
+            "node_id": "node-a",
+            "swarm_id": "swarm-1",
+            "swarm_name": "Beta Swarm",
+            "manifest_hash": "hash-def",
+            "aggregation_name": "FedProx",
+            "topology_name": "Star",
+            "manifest": {"name": "Beta", "round_limit": 10},
+        },
+    )
+
+    node = store.get_node("node-a")
+    assert node["swarm_id"] == "swarm-1"
+    assert node["swarm_name"] == "Beta Swarm"
+    assert node["manifest_hash"] == "hash-def"
+    assert node["aggregation_name"] == "FedProx"
+    assert node["topology_name"] == "Star"
+
+    swarms = store.get_swarms()
+    assert len(swarms) == 1
+    assert swarms[0]["swarm_id"] == "swarm-1"
+    assert swarms[0]["swarm_name"] == "Beta"
+    assert swarms[0]["peer_count"] == 1
+    assert store.get_manifest("swarm-1") == {"name": "Beta", "round_limit": 10}
+
+
+def test_get_swarms_returns_correct_listings_and_peer_counts():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "swarm_name": "Swarm One",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-b",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-c",
+        "domain": "test",
+        "running": True,
+        "swarm_id": "swarm-2",
+        "swarm_name": "Swarm Two",
+    })
+
+    swarms = store.get_swarms()
+    by_id = {s["swarm_id"]: s for s in swarms}
+
+    assert len(swarms) == 2
+    assert by_id["swarm-1"]["peer_count"] == 2
+    assert by_id["swarm-1"]["domains"] == ["demo"]
+    assert by_id["swarm-2"]["peer_count"] == 1
+    assert set(by_id["swarm-2"]["domains"]) == {"test"}
+
+
+def test_drop_node_cleans_up_swarm_nodes():
+    store = TelemetryStore(session_id="session-1", max_nodes=2)
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "timestamp": "2026-04-08T08:00:00",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-b",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "timestamp": "2026-04-08T09:00:00",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-c",
+        "domain": "demo",
+        "running": True,
+        "timestamp": "2026-04-08T10:00:00",
+    })
+
+    assert store.get_node("node-a") is None
+    swarms = store.get_swarms()
+    assert len(swarms) == 1
+    assert swarms[0]["peer_count"] == 1
+
+
+def test_ingest_event_node_started_without_manifest_sets_swarm_fields_and_swarm_nodes():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_event(
+        "node.started",
+        {
+            "node_id": "node-a",
+            "swarm_id": "swarm-1",
+            "swarm_name": "Beta Swarm",
+            "manifest_hash": "hash-def",
+            "aggregation_name": "FedProx",
+            "topology_name": "Star",
+        },
+    )
+
+    node = store.get_node("node-a")
+    assert node["swarm_id"] == "swarm-1"
+    assert node["swarm_name"] == "Beta Swarm"
+    assert node["manifest_hash"] == "hash-def"
+    assert node["aggregation_name"] == "FedProx"
+    assert node["topology_name"] == "Star"
+
+    swarms = store.get_swarms()
+    assert len(swarms) == 1
+    assert swarms[0]["swarm_id"] == "swarm-1"
+    assert swarms[0]["swarm_name"] == "Beta Swarm"
+    assert swarms[0]["peer_count"] == 1
+    assert store.get_manifest("swarm-1") is None
+
+
+def test_dashboard_snapshot_includes_swarms_in_network_section():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "swarm_name": "Alpha Swarm",
+        "manifest_hash": "hash-abc",
+        "aggregation_name": "FedAvg",
+        "topology_name": "Ring",
+    })
+
+    snapshot = store.get_dashboard_snapshot()
+
+    assert "swarms" in snapshot["network"]
+    swarms = snapshot["network"]["swarms"]
+    assert len(swarms) == 1
+    assert swarms[0]["swarm_id"] == "swarm-1"
+    assert swarms[0]["swarm_name"] == "Alpha Swarm"
+
+
+def test_ingest_heartbeat_caches_manifest_when_present():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-1",
+        "manifest": {"name": "Cached", "description": "from heartbeat"},
+    })
+
+    assert store.get_manifest("swarm-1") == {"name": "Cached", "description": "from heartbeat"}
+
+
+def test_swarm_change_removes_node_from_old_swarm():
+    store = TelemetryStore(session_id="session-1")
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-a",
+    })
+    store.ingest_heartbeat({
+        "node_id": "node-a",
+        "domain": "demo",
+        "running": True,
+        "swarm_id": "swarm-b",
+    })
+
+    swarms = store.get_swarms()
+    by_id = {s["swarm_id"]: s for s in swarms}
+
+    assert by_id["swarm-a"]["peer_count"] == 0
+    assert by_id["swarm-b"]["peer_count"] == 1
