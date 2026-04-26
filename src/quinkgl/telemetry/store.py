@@ -41,6 +41,8 @@ SUPPORTED_TELEMETRY_EVENT_TYPES = {
     "peer_disconnected",
     "peer_discovered",
     "post_aggregation_eval",
+    "round_completed",
+    "round_started",
     "subscriber.error",
     "targets_selected",
     "telemetry.connected",
@@ -454,7 +456,11 @@ class TelemetryStore:
 
     @staticmethod
     def _is_supported_event_type(event_type: str) -> bool:
-        return event_type in SUPPORTED_TELEMETRY_EVENT_TYPES or event_type.startswith("security.")
+        return (
+            event_type in SUPPORTED_TELEMETRY_EVENT_TYPES
+            or event_type.startswith("node.state.")
+            or event_type.startswith("security.")
+        )
 
     @staticmethod
     def _require_non_empty_node_id(value: Any) -> str:

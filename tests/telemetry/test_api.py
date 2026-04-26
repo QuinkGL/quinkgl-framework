@@ -54,6 +54,49 @@ def test_api_ingest_updates_node_endpoints():
     assert rounds[0]["round_number"] == 2
 
 
+def test_api_accepts_runtime_node_state_and_round_events():
+    app = create_telemetry_app(store=TelemetryStore(session_id="session-1"))
+    client = TestClient(app)
+
+    state_response = client.post(
+        "/api/telemetry/events",
+        json={
+            "event_type": "node.state.training",
+            "payload": {
+                "node_id": "node-a",
+                "from": "peers_discovered",
+                "to": "training",
+                "rounds": 3,
+            },
+        },
+    )
+    round_started_response = client.post(
+        "/api/telemetry/events",
+        json={
+            "event_type": "round_started",
+            "payload": {"node_id": "node-a", "round": 1},
+        },
+    )
+    round_completed_response = client.post(
+        "/api/telemetry/events",
+        json={
+            "event_type": "round_completed",
+            "payload": {"node_id": "node-a", "round": 1, "duration": 0.5},
+        },
+    )
+
+    events = client.get("/api/nodes/node-a/events").json()
+
+    assert state_response.status_code == 202
+    assert round_started_response.status_code == 202
+    assert round_completed_response.status_code == 202
+    assert [event["event_type"] for event in events] == [
+        "node.state.training",
+        "round_started",
+        "round_completed",
+    ]
+
+
 def test_api_rejects_missing_payload_node_id():
     app = create_telemetry_app(store=TelemetryStore(session_id="session-1"))
     client = TestClient(app)
