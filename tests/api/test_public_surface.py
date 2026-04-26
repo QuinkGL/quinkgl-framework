@@ -92,11 +92,11 @@ EXPECTED_TOPLEVEL = {
     "TerminalObserver",
     "format_runtime_event",
     "TelemetryClient",
-    # Feature flags (prefixed underscore is acceptable at package root —
-    # these are documented in __all__ to keep ``from quinkgl import *``
-    # self-documenting when `hasattr` checks are used downstream).
     "_tensorflow_available",
     "_data_available",
+    # Feature flags / optional stacks (stable public booleans)
+    "HAS_TENSORFLOW",
+    "HAS_DATA",
 }
 
 # `quinkgl.manifest`: CURRENT + Phase 1 additions now promoted.  The spec

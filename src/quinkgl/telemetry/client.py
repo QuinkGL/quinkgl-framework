@@ -326,6 +326,7 @@ class TelemetryClient:
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         self._background_tasks.clear()
+        self._heartbeat_task = None
 
         # T-OBS-10: Close module-level httpx client
         await close_module_http_client()
