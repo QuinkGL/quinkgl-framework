@@ -141,6 +141,7 @@ cython_debug/
 .DS_Store
 
 # QuinkGL specific
+*.telemetry.qglkey
 archives/*.tar.gz
 docs/_build/
 docs-md/
