@@ -622,13 +622,17 @@ class TelemetryStore:
         self.session.selected_node_id = self._select_default_node_id()
 
     def _select_default_node_id(self) -> Optional[str]:
-        running_nodes = sorted(
-            (node for node in self._nodes.values() if node.running),
-            key=lambda node: (node.last_seen_at or datetime.min, node.node_id),
-            reverse=True,
-        )
+        """Pick the most recently seen running node; break ties by node_id (stable on all OS clocks)."""
+        running_nodes = list(node for node in self._nodes.values() if node.running)
+
+        def _activity_sort_key(node: NodeSnapshot) -> Tuple[float, str]:
+            if node.last_seen_at is None:
+                # Missing heartbeat time sorts as oldest among runners.
+                return (float("inf"), node.node_id)
+            return (-node.last_seen_at.timestamp(), node.node_id)
+
         if running_nodes:
-            return running_nodes[0].node_id
+            return sorted(running_nodes, key=_activity_sort_key)[0].node_id
         return sorted(self._nodes)[0] if self._nodes else None
 
     def _broadcasts_for(
