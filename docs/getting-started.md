@@ -575,4 +575,4 @@ quinkgl info
 
 ---
 
-*This guide is written for QuinkGL v0.3.2.*
+*This guide is written for QuinkGL v0.3.3.*

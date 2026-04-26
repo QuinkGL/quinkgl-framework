@@ -13,7 +13,7 @@ def test_version_matches_distribution_metadata_when_available():
     try:
         expected_version = version("quinkgl")
     except PackageNotFoundError:
-        expected_version = "0.3.2"
+        expected_version = "0.3.3"
 
     assert quinkgl.__version__ == expected_version
 
