@@ -26,6 +26,11 @@ from quinkgl.manifest.strategy_factory import (
     build_topology_from_manifest,
 )
 from quinkgl.models import PyTorchModel
+from quinkgl.telemetry.api import (
+    DEFAULT_TELEMETRY_BASE_URL,
+    TELEMETRY_DISABLE_ENV,
+    TELEMETRY_URL_ENV,
+)
 
 from .exit_codes import (
     NODE_CONFIG_ERROR,
@@ -62,7 +67,20 @@ def build_parser(sub: _SubParsersAction) -> None:
         default=None,
         help="Max |msg_round - local_round| to accept an update (default: 10)",
     )
-    parser.add_argument("--telemetry-url", default=None)
+    parser.add_argument(
+        "--telemetry-url",
+        default=None,
+        help=(
+            "Telemetry HTTP base URL (overrides "
+            f"{TELEMETRY_URL_ENV}). When omitted, defaults to {DEFAULT_TELEMETRY_BASE_URL!r} "
+            f"unless {TELEMETRY_DISABLE_ENV}=1 or --no-telemetry is set."
+        ),
+    )
+    parser.add_argument(
+        "--no-telemetry",
+        action="store_true",
+        help="Do not send telemetry (overrides URL default and env).",
+    )
     parser.add_argument("--telemetry-secret", default=None)
     parser.add_argument("--telemetry-heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--checkpoint-dir", default=None)
@@ -166,9 +184,34 @@ def _resolve_rounds(args_rounds: int | None, manifest_limit: int | None) -> int:
     return min(requested, limit)
 
 
+def _telemetry_disabled_via_env() -> bool:
+    raw = (os.environ.get(TELEMETRY_DISABLE_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _resolve_effective_telemetry_url(args: argparse.Namespace) -> Optional[str]:
+    """Return the telemetry base URL, or None if telemetry is off.
+
+    Precedence: ``--no-telemetry`` → :envvar:`TELEMETRY_DISABLE_ENV` →
+    ``--telemetry-url`` → :envvar:`TELEMETRY_URL_ENV` →
+    :data:`~quinkgl.telemetry.api.DEFAULT_TELEMETRY_BASE_URL`.
+    """
+    if args.no_telemetry or _telemetry_disabled_via_env():
+        return None
+    if args.telemetry_url:
+        stripped = args.telemetry_url.strip()
+        if stripped:
+            return stripped
+    env_url = (os.environ.get(TELEMETRY_URL_ENV) or "").strip()
+    if env_url:
+        return env_url
+    return DEFAULT_TELEMETRY_BASE_URL
+
+
 def _attach_telemetry(node: GossipNode, args: argparse.Namespace) -> None:
-    """Wire TelemetryClient to node EventEmitter when --telemetry-url is set (§10.8)."""
-    if not args.telemetry_url:
+    """Wire :class:`~quinkgl.telemetry.client.TelemetryClient` to ``node`` (§10.8)."""
+    base_url = _resolve_effective_telemetry_url(args)
+    if not base_url:
         return
     try:
         from quinkgl.telemetry import TelemetryClient
@@ -177,12 +220,12 @@ def _attach_telemetry(node: GossipNode, args: argparse.Namespace) -> None:
         return
 
     client = TelemetryClient(
-        base_url=args.telemetry_url,
-        secret=args.telemetry_secret or os.environ.get("QUINKGL_TELEMETRY_SECRET"),
+        base_url=base_url,
+        auth_secret=args.telemetry_secret or os.environ.get("QUINKGL_TELEMETRY_SECRET"),
         heartbeat_interval=args.telemetry_heartbeat_interval,
     )
-    node.event_emitter.subscribe(client.handle)
-    log.info("TelemetryClient wired to %s", args.telemetry_url)
+    node.attach_telemetry_client(telemetry_client=client)
+    log.info("TelemetryClient wired to %s", base_url)
 
 
 def _attach_hooks(node: GossipNode, mod: Any) -> None:

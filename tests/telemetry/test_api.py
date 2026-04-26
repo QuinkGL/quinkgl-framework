@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from quinkgl.telemetry.api import DEFAULT_TELEMETRY_AUTH_HEADER
-from quinkgl.telemetry.server import create_telemetry_app
+from quinkgl.telemetry.server import _rate_limit_bucket_key, create_telemetry_app
 from quinkgl.telemetry.store import TelemetryStore
 
 
@@ -85,8 +85,27 @@ def test_api_exposes_cors_headers_for_browser_clients():
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
-def test_api_defaults_to_same_origin_without_cors_headers_for_foreign_origin():
+def test_api_defaults_to_permissive_cors_for_cross_origin_dashboards():
     app = create_telemetry_app(store=TelemetryStore(session_id="session-1"))
+    client = TestClient(app)
+
+    response = client.options(
+        "/api/session",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "*"
+
+
+def test_api_accepts_explicit_empty_cors_via_kwarg():
+    app = create_telemetry_app(
+        store=TelemetryStore(session_id="session-1"),
+        cors_allow_origins=[],
+    )
     client = TestClient(app)
 
     response = client.options(
@@ -99,6 +118,12 @@ def test_api_defaults_to_same_origin_without_cors_headers_for_foreign_origin():
 
     assert response.status_code == 400
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_rate_limit_bucket_prefers_x_forwarded_for_from_loopback():
+    assert _rate_limit_bucket_key("127.0.0.1", "203.0.113.9, 127.0.0.1") == "203.0.113.9"
+    assert _rate_limit_bucket_key("192.168.1.1", "203.0.113.9") == "192.168.1.1"
+    assert _rate_limit_bucket_key("127.0.0.1", "") == "127.0.0.1"
 
 
 def test_api_requires_auth_for_ingest_when_secret_configured():
