@@ -6,7 +6,7 @@ live QuinkGL dashboard.
 ## Prerequisites
 
 - A running swarm (see [Tutorial T5](../T5/index.md) for local testing)
-- Dashboard URL and telemetry secret from your swarm operator
+- A manifest enrolled with `quinkgl telemetry enroll`
 
 ## Architecture Overview
 
@@ -20,23 +20,34 @@ Peer A,B,C  ──HTTP POST──►  Oracle VPS
 ```
 
 The dashboard is a separate React application already hosted on an Oracle
-VPS.  You do **not** need to install or run it yourself.  Each peer only
-needs the dashboard URL and the shared telemetry secret.
+VPS.  You do **not** need to install or run it yourself.  Enroll the manifest
+once to create the private `.telemetry.qglkey` file for that swarm.
 
-## Step 1: Point Peers at the Dashboard
+## Step 1: Enable Peer Telemetry
 
-Add `--telemetry-url` to every `quinkgl run` invocation:
+Enroll the manifest:
 
 ```bash
-export QUINKGL_TELEMETRY_SECRET="<secret-from-operator>"
-quinkgl run \
-  --manifest my-swarm.qgl \
-  --script peer_script.py \
-  --telemetry-url https://dash.quinkgl.io/api
+quinkgl telemetry enroll my-swarm.qgl --dashboard-url https://dash.quinkgl.io
 ```
 
-The CLI also reads `QUINKGL_TELEMETRY_SECRET` from the environment, so you
-can omit `--telemetry-secret` when the env var is set.
+This writes:
+
+```text
+my-swarm.qgl
+my-swarm.telemetry.qglkey
+```
+
+Then start the peer normally:
+
+```bash
+quinkgl run \
+  --manifest my-swarm.qgl \
+  --script peer_script.py
+```
+
+The CLI verifies that the `.qglkey` `swarm_id` matches the manifest hash before
+sending telemetry. Legacy deployments can still use `QUINKGL_TELEMETRY_SECRET`.
 
 By default the heartbeat interval is 5 s.  Change it with
 `--telemetry-heartbeat-interval 10.0`.
@@ -90,9 +101,9 @@ Message types: `node_snapshot_updated`, `session_stats_updated`,
 
 ## Security Notes
 
-- Always set `--telemetry-secret` (or `QUINKGL_TELEMETRY_SECRET`) in
-  production.  The server rejects unauthenticated ingest requests with
-  HTTP 401.
+- Use a private `.telemetry.qglkey` file for production swarms. Legacy
+  deployments can still use `--telemetry-secret` or `QUINKGL_TELEMETRY_SECRET`.
+  The server rejects missing or invalid ingest credentials with HTTP 401.
 - The telemetry endpoint stores only aggregate metrics and event metadata,
   **never** model weights or raw training data.
 

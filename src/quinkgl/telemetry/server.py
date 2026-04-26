@@ -22,6 +22,7 @@ from quinkgl.telemetry.api import (
 )
 from quinkgl.telemetry.store import TelemetryStore
 from quinkgl.telemetry.stream import STREAM_CLOSE_CODE_QUEUE_FULL, TelemetryStreamHub
+from quinkgl.telemetry.tokens import TelemetryTokenRegistry
 
 
 DEFAULT_TELEMETRY_MAX_REQUEST_BYTES = 64 * 1024
@@ -64,6 +65,7 @@ def create_telemetry_app(
     *,
     auth_secret: str | None = None,
     auth_header_name: str | None = None,
+    token_registry: TelemetryTokenRegistry | None = None,
     cors_allow_origins: list[str] | None = None,
     max_request_bytes: int | None = None,
     rate_limit_max_requests: int | None = None,
@@ -101,12 +103,26 @@ def create_telemetry_app(
     app.state.telemetry_stream_hub = stream_hub
     app.state.telemetry_auth_secret = auth_secret
     app.state.telemetry_auth_header_name = auth_header_name
+    app.state.telemetry_token_registry = token_registry
     app.state.telemetry_cors_allow_origins = list(cors_allow_origins)
     app.state.telemetry_max_request_bytes = max_request_bytes
     app.state.telemetry_rate_limit_max_requests = rate_limit_max_requests
     app.state.telemetry_rate_limit_window_seconds = rate_limit_window_seconds
 
-    def require_ingest_auth(header_value: str | None) -> None:
+    def require_ingest_auth(header_value: str | None, payload: dict | None = None) -> None:
+        if token_registry is not None:
+            record = token_registry.resolve(header_value)
+            if record is None:
+                raise HTTPException(status_code=401, detail="Invalid telemetry token")
+            data = payload or {}
+            payload_swarm_id = data.get("swarm_id") or data.get("manifest_hash")
+            if payload_swarm_id and payload_swarm_id != record.swarm_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Telemetry token is not valid for this swarm",
+                )
+            data["swarm_id"] = record.swarm_id
+            return
         if not auth_secret:
             return
         if header_value != auth_secret:
@@ -146,6 +162,36 @@ def create_telemetry_app(
             return {"type": "http.request", "body": body, "more_body": False}
 
         return await call_next(Request(request.scope, receive))
+
+    @app.post("/api/telemetry/enroll", status_code=201)
+    async def enroll_swarm(request: Request):
+        if token_registry is None:
+            raise HTTPException(status_code=503, detail="Telemetry enrollment is not configured")
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Enrollment payload must be an object")
+        swarm_id = payload.get("swarm_id")
+        if not isinstance(swarm_id, str) or not swarm_id.strip():
+            raise HTTPException(status_code=422, detail="swarm_id is required")
+        dashboard_url = payload.get("dashboard_url") or ""
+        if dashboard_url and not isinstance(dashboard_url, str):
+            raise HTTPException(status_code=422, detail="dashboard_url must be a string")
+        display_name = payload.get("display_name") or swarm_id
+        token = token_registry.create_token(swarm_id=swarm_id, name=str(display_name))
+        manifest = payload.get("manifest")
+        if isinstance(manifest, dict):
+            store._manifests[swarm_id] = manifest
+        return {
+            "swarm_id": swarm_id,
+            "dashboard_url": dashboard_url,
+            "ingest_token": token,
+            "qglkey": {
+                "schema_version": 1,
+                "swarm_id": swarm_id,
+                "dashboard_url": dashboard_url,
+                "ingest_token": token,
+            },
+        }
 
     @app.get("/api/session")
     async def get_session():
@@ -204,7 +250,7 @@ def create_telemetry_app(
 
     @app.post("/api/telemetry/events", status_code=202)
     async def ingest_event(request: Request, event: TelemetryEventIngest):
-        require_ingest_auth(request.headers.get(auth_header_name))
+        require_ingest_auth(request.headers.get(auth_header_name), event.payload)
         try:
             broadcasts = store.ingest_event(event.event_type, event.payload, event.timestamp)
         except ValueError as exc:
@@ -215,8 +261,8 @@ def create_telemetry_app(
 
     @app.post("/api/telemetry/heartbeats", status_code=202)
     async def ingest_heartbeat(request: Request, heartbeat: TelemetryHeartbeatIngest):
-        require_ingest_auth(request.headers.get(auth_header_name))
         payload = heartbeat.model_dump(exclude_none=True)
+        require_ingest_auth(request.headers.get(auth_header_name), payload)
         try:
             broadcasts = store.ingest_heartbeat(payload)
         except ValueError as exc:

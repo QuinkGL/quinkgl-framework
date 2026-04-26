@@ -14,6 +14,7 @@ from quinkgl.manifest.schema import (
     PrototypePolicy,
     SwarmManifest,
     TaskSpec,
+    TelemetryConfig,
 )
 from quinkgl.manifest.signing import keygen, sign_manifest, verify_manifest
 
@@ -65,6 +66,7 @@ __all__ = [
     "PrototypePolicy",
     "SwarmManifest",
     "TaskSpec",
+    "TelemetryConfig",
     "check_compatibility",
     "compute_arch_hash",
     "format_magnet",

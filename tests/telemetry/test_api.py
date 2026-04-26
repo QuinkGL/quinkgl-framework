@@ -157,6 +157,78 @@ def test_api_requires_auth_for_ingest_when_secret_configured():
     assert read_response.status_code == 200
 
 
+def test_api_accepts_swarm_scoped_token_for_matching_swarm():
+    from quinkgl.telemetry.tokens import TelemetryTokenRegistry
+
+    app = create_telemetry_app(
+        store=TelemetryStore(session_id="session-1"),
+        token_registry=TelemetryTokenRegistry.from_plain_tokens(
+            [{"swarm_id": "swarm-1", "token": "qgl_live_swarm_1"}]
+        ),
+    )
+    client = TestClient(app)
+
+    accepted = client.post(
+        "/api/telemetry/events",
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: "qgl_live_swarm_1"},
+        json={
+            "event_type": "node.started",
+            "payload": {"node_id": "node-a", "swarm_id": "swarm-1"},
+        },
+    )
+    rejected = client.post(
+        "/api/telemetry/events",
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: "qgl_live_swarm_1"},
+        json={
+            "event_type": "node.started",
+            "payload": {"node_id": "node-b", "swarm_id": "swarm-2"},
+        },
+    )
+
+    assert accepted.status_code == 202
+    assert rejected.status_code == 403
+
+
+def test_api_open_enrollment_persists_swarm_token_and_returns_qglkey(tmp_path):
+    from quinkgl.telemetry.tokens import TelemetryTokenRegistry
+
+    token_file = tmp_path / "tokens.json"
+    registry = TelemetryTokenRegistry.from_file(token_file, missing_ok=True)
+    app = create_telemetry_app(
+        store=TelemetryStore(session_id="session-1"),
+        token_registry=registry,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/telemetry/enroll",
+        json={
+            "swarm_id": "swarm-enroll-1",
+            "dashboard_url": "https://dash.example.com",
+            "display_name": "Enroll Test",
+            "manifest": {"name": "Enroll Test"},
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["swarm_id"] == "swarm-enroll-1"
+    assert body["qglkey"]["swarm_id"] == "swarm-enroll-1"
+    assert body["qglkey"]["dashboard_url"] == "https://dash.example.com"
+    assert body["qglkey"]["ingest_token"].startswith("qgl_live_")
+    assert "token_hash" in token_file.read_text(encoding="utf-8")
+
+    accepted = client.post(
+        "/api/telemetry/events",
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: body["qglkey"]["ingest_token"]},
+        json={
+            "event_type": "node.started",
+            "payload": {"node_id": "node-a", "swarm_id": "swarm-enroll-1"},
+        },
+    )
+    assert accepted.status_code == 202
+
+
 def test_api_accepts_custom_auth_header_name_for_ingest():
     app = create_telemetry_app(
         store=TelemetryStore(session_id="session-1"),

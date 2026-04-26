@@ -11,8 +11,8 @@ TELEMETRY_AUTH_SECRET_ENV = "QUINKGL_TELEMETRY_SECRET"
 TELEMETRY_AUTH_HEADER_ENV = "QUINKGL_TELEMETRY_SECRET_HEADER"
 TELEMETRY_CORS_ALLOW_ORIGINS_ENV = "QUINKGL_TELEMETRY_CORS_ALLOW_ORIGINS"
 # Default telemetry API origin (no ``/api`` suffix). Override with
-# :envvar:`TELEMETRY_URL_ENV` or ``quinkgl run --telemetry-url``. Disable with
-# :envvar:`TELEMETRY_DISABLE_ENV` or ``quinkgl run --no-telemetry``.
+# :envvar:`TELEMETRY_URL_ENV`. Disable with :envvar:`TELEMETRY_DISABLE_ENV`
+# or ``quinkgl run --no-telemetry``.
 DEFAULT_TELEMETRY_BASE_URL = "https://141-147-36-24.sslip.io"
 TELEMETRY_URL_ENV = "QUINKGL_TELEMETRY_URL"
 TELEMETRY_DISABLE_ENV = "QUINKGL_TELEMETRY_DISABLE"
