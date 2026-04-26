@@ -36,6 +36,28 @@ INGEST_PATHS = {"/api/telemetry/events", "/api/telemetry/heartbeats", "/api/tele
 logger = logging.getLogger(__name__)
 
 
+def _resolved_cors_allow_origins(explicit: list[str] | None) -> list[str]:
+    """Browser dashboards need CORS; an empty env would otherwise deny every origin."""
+    if explicit is not None:
+        return list(explicit)
+    raw = os.getenv(TELEMETRY_CORS_ALLOW_ORIGINS_ENV, "")
+    parsed = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    if parsed:
+        return parsed
+    # Hosted SPAs (e.g. Vercel) and local Vite without extra server configuration.
+    return ["*"]
+
+
+def _rate_limit_bucket_key(client_host: str | None, forwarded_for: str | None) -> str:
+    """When uvicorn sits behind nginx on loopback, rate-limit per real client."""
+    host = (client_host or "").strip() or "unknown"
+    if host in ("127.0.0.1", "::1") and forwarded_for:
+        first = forwarded_for.split(",")[0].strip()
+        if first:
+            return first
+    return host
+
+
 def create_telemetry_app(
     store: TelemetryStore | None = None,
     stream_hub: TelemetryStreamHub | None = None,
@@ -51,9 +73,7 @@ def create_telemetry_app(
     stream_hub = stream_hub or TelemetryStreamHub()
     auth_secret = auth_secret if auth_secret is not None else os.getenv(TELEMETRY_AUTH_SECRET_ENV)
     auth_header_name = auth_header_name or os.getenv(TELEMETRY_AUTH_HEADER_ENV) or DEFAULT_TELEMETRY_AUTH_HEADER
-    if cors_allow_origins is None:
-        raw_allow_origins = os.getenv(TELEMETRY_CORS_ALLOW_ORIGINS_ENV, "")
-        cors_allow_origins = [origin.strip() for origin in raw_allow_origins.split(",") if origin.strip()]
+    cors_allow_origins = _resolved_cors_allow_origins(cors_allow_origins)
     max_request_bytes = int(
         max_request_bytes
         if max_request_bytes is not None
@@ -113,7 +133,12 @@ def create_telemetry_app(
         if len(body) > max_request_bytes:
             return JSONResponse(status_code=413, content={"detail": "Telemetry request too large"})
         try:
-            check_rate_limit(request.client.host if request.client else None)
+            check_rate_limit(
+                _rate_limit_bucket_key(
+                    request.client.host if request.client else None,
+                    request.headers.get("x-forwarded-for"),
+                )
+            )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
