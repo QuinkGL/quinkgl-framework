@@ -63,7 +63,10 @@ class TelemetryTokenRegistry:
         p = Path(path)
         if missing_ok and not p.exists():
             return cls(path=p)
-        data = json.loads(p.read_text(encoding="utf-8"))
+        raw = p.read_text(encoding="utf-8")
+        if not raw.strip():
+            return cls(path=p)
+        data = json.loads(raw)
         if isinstance(data, list):
             entries = data
         elif isinstance(data, dict):

@@ -6,6 +6,7 @@ import pytest
 from quinkgl.cli import run_cmd
 from quinkgl.manifest.schema import SwarmManifest, TelemetryConfig
 from quinkgl.telemetry.qglkey import load_qglkey
+from quinkgl.telemetry.tokens import TelemetryTokenRegistry
 
 
 def test_manifest_round_trips_secret_free_telemetry_metadata():
@@ -90,3 +91,12 @@ def test_run_falls_back_to_global_secret_when_qglkey_missing(tmp_path, monkeypat
     )
 
     assert auth.secret == "global-secret"
+
+
+def test_token_registry_accepts_empty_touched_file(tmp_path):
+    token_file = tmp_path / "tokens.json"
+    token_file.write_text("", encoding="utf-8")
+
+    registry = TelemetryTokenRegistry.from_file(token_file)
+
+    assert registry.resolve("qgl_live_missing") is None
