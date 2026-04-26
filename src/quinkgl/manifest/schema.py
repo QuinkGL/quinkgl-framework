@@ -70,6 +70,7 @@ _TASK_TYPES = frozenset({"classification", "regression", "segmentation", "detect
 _LABEL_TYPES = frozenset({"integer", "float", "binary", "multiclass", "multilabel"})
 _FRAMEWORKS = frozenset({"pytorch", "tensorflow", "custom"})
 _PEER_KINDS = frozenset({"ipv8", "tunnel"})
+_TELEMETRY_ENROLLMENT_MODES = frozenset({"invite-required", "none"})
 
 _NAME_MAX_LEN = 128
 _DESCRIPTION_MAX_LEN = 1024
@@ -958,6 +959,65 @@ class ByzantineSpec:
             )
 
 
+@dataclass
+class TelemetryConfig:
+    """Secret-free dashboard enrollment metadata carried by a `.qgl` file."""
+
+    dashboard_url: str = ""
+    enrollment: str = "none"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "dashboard_url": self.dashboard_url,
+            "enrollment": self.enrollment,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any, strict: bool = True) -> "TelemetryConfig":
+        if data is None:
+            return cls()
+        _ensure_dict(data, "TelemetryConfig")
+        allowed = {"dashboard_url", "enrollment"}
+        if strict:
+            _check_allowed_keys(data, allowed, "TelemetryConfig")
+        return cls(
+            dashboard_url=str(data.get("dashboard_url") or ""),
+            enrollment=str(data.get("enrollment") or "none"),
+        )
+
+    def validate(self) -> None:
+        if not isinstance(self.dashboard_url, str):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="telemetry.dashboard_url",
+                detail="must be a string",
+            )
+        if self.dashboard_url and not (
+            self.dashboard_url.startswith("https://")
+            or self.dashboard_url.startswith("http://")
+        ):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="telemetry.dashboard_url",
+                detail="must be an HTTP(S) origin",
+                value=self.dashboard_url,
+            )
+        if self.dashboard_url.endswith("/api"):
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="telemetry.dashboard_url",
+                detail="must be the dashboard origin without /api",
+                value=self.dashboard_url,
+            )
+        if self.enrollment not in _TELEMETRY_ENROLLMENT_MODES:
+            _raise(
+                ERR_MANIFEST_FIELD_INVALID,
+                field="telemetry.enrollment",
+                detail=f"must be one of {sorted(_TELEMETRY_ENROLLMENT_MODES)}",
+                value=self.enrollment,
+            )
+
+
 # ---------------------------------------------------------------------------
 # SwarmManifest — v3 top-level
 # ---------------------------------------------------------------------------
@@ -985,6 +1045,7 @@ _V3_ALLOWED_TOP_KEYS = {
     "tracker_urls",
     "creator_pubkey",
     "signature",
+    "telemetry",
 }
 
 _V3_REQUIRED_TOP_KEYS = {
@@ -1030,6 +1091,7 @@ class SwarmManifest:
     tracker_urls: List[List[str]] = field(default_factory=list)
     creator_pubkey: Optional[str] = None  # §4.7.6 (Phase 2 signing target)
     signature: Optional[str] = None  # §4.7.7 — EXCLUDED from canonical bytes
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
     # ------------------------------------------------------------------
     # Serialization
@@ -1065,6 +1127,7 @@ class SwarmManifest:
             "tracker_urls": [list(tier) for tier in self.tracker_urls],
             "creator_pubkey": self.creator_pubkey,
             "signature": self.signature,
+            "telemetry": self.telemetry.to_dict(),
         }
 
     @classmethod
@@ -1111,6 +1174,7 @@ class SwarmManifest:
         task_data = data.get("task", TaskSpec().to_dict())
         model_data = data.get("model", ModelSpec().to_dict())
         byz_data = data.get("byzantine", ByzantineSpec().to_dict())
+        telemetry_data = data.get("telemetry", TelemetryConfig().to_dict())
 
         instance = cls(
             schema_version=data.get("schema_version", MANIFEST_SCHEMA_VERSION),
@@ -1137,6 +1201,7 @@ class SwarmManifest:
             tracker_urls=list(data.get("tracker_urls", [])),
             creator_pubkey=data.get("creator_pubkey"),
             signature=data.get("signature"),
+            telemetry=TelemetryConfig.from_dict(telemetry_data, strict=strict),
         )
 
         if strict:
@@ -1301,6 +1366,7 @@ class SwarmManifest:
         self.task.validate()
         self.model.validate()
         self.byzantine.validate()
+        self.telemetry.validate()
 
     # ------------------------------------------------------------------
     # Canonical encoding / hashing (§5)

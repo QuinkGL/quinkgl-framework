@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
@@ -31,6 +32,7 @@ from quinkgl.telemetry.api import (
     TELEMETRY_DISABLE_ENV,
     TELEMETRY_URL_ENV,
 )
+from quinkgl.telemetry.qglkey import default_qglkey_path, load_qglkey
 
 from .exit_codes import (
     NODE_CONFIG_ERROR,
@@ -42,6 +44,12 @@ if TYPE_CHECKING:
     from argparse import _SubParsersAction
 
 log = logging.getLogger("quinkgl.cli.run")
+
+
+@dataclass(frozen=True)
+class TelemetryAuth:
+    base_url: str
+    secret: str | None
 
 
 def build_parser(sub: _SubParsersAction) -> None:
@@ -66,15 +74,6 @@ def build_parser(sub: _SubParsersAction) -> None:
         type=int,
         default=None,
         help="Max |msg_round - local_round| to accept an update (default: 10)",
-    )
-    parser.add_argument(
-        "--telemetry-url",
-        default=None,
-        help=(
-            "Telemetry HTTP base URL (overrides "
-            f"{TELEMETRY_URL_ENV}). When omitted, defaults to {DEFAULT_TELEMETRY_BASE_URL!r} "
-            f"unless {TELEMETRY_DISABLE_ENV}=1 or --no-telemetry is set."
-        ),
     )
     parser.add_argument(
         "--no-telemetry",
@@ -193,22 +192,50 @@ def _resolve_effective_telemetry_url(args: argparse.Namespace) -> Optional[str]:
     """Return the telemetry base URL, or None if telemetry is off.
 
     Precedence: ``--no-telemetry`` → :envvar:`TELEMETRY_DISABLE_ENV` →
-    ``--telemetry-url`` → :envvar:`TELEMETRY_URL_ENV` →
+    :envvar:`TELEMETRY_URL_ENV` →
     :data:`~quinkgl.telemetry.api.DEFAULT_TELEMETRY_BASE_URL`.
     """
     if args.no_telemetry or _telemetry_disabled_via_env():
         return None
-    if args.telemetry_url:
-        stripped = args.telemetry_url.strip()
-        if stripped:
-            return stripped
     env_url = (os.environ.get(TELEMETRY_URL_ENV) or "").strip()
     if env_url:
         return env_url
     return DEFAULT_TELEMETRY_BASE_URL
 
 
-def _attach_telemetry(node: GossipNode, args: argparse.Namespace) -> None:
+def _resolve_telemetry_auth(
+    args: argparse.Namespace,
+    *,
+    manifest: SwarmManifest,
+    manifest_path: str | Path | None = None,
+    default_base_url: str | None = None,
+) -> TelemetryAuth:
+    manifest_telemetry = getattr(manifest, "telemetry", None)
+    base_url = (
+        default_base_url
+        or getattr(manifest_telemetry, "dashboard_url", "")
+        or DEFAULT_TELEMETRY_BASE_URL
+    ).rstrip("/")
+    if manifest_path is not None:
+        key_path = default_qglkey_path(manifest_path)
+        if key_path.exists():
+            key = load_qglkey(key_path, expected_swarm_id=manifest.manifest_hash())
+            return TelemetryAuth(
+                base_url=(key.dashboard_url or base_url).rstrip("/"),
+                secret=key.ingest_token,
+            )
+    return TelemetryAuth(
+        base_url=base_url,
+        secret=args.telemetry_secret or os.environ.get("QUINKGL_TELEMETRY_SECRET"),
+    )
+
+
+def _attach_telemetry(
+    node: GossipNode,
+    args: argparse.Namespace,
+    *,
+    manifest_path: str | Path | None = None,
+) -> None:
     """Wire :class:`~quinkgl.telemetry.client.TelemetryClient` to ``node`` (§10.8)."""
     base_url = _resolve_effective_telemetry_url(args)
     if not base_url:
@@ -219,9 +246,15 @@ def _attach_telemetry(node: GossipNode, args: argparse.Namespace) -> None:
         log.warning("TelemetryClient not available; skipping telemetry wiring")
         return
 
+    auth = _resolve_telemetry_auth(
+        args,
+        manifest=node.manifest,
+        manifest_path=manifest_path,
+        default_base_url=base_url,
+    )
     client = TelemetryClient(
-        base_url=base_url,
-        auth_secret=args.telemetry_secret or os.environ.get("QUINKGL_TELEMETRY_SECRET"),
+        base_url=auth.base_url or base_url,
+        auth_secret=auth.secret,
         heartbeat_interval=args.telemetry_heartbeat_interval,
     )
     node.attach_telemetry_client(telemetry_client=client)
@@ -247,10 +280,12 @@ def _attach_hooks(node: GossipNode, mod: Any) -> None:
 
 async def _async_run(args: argparse.Namespace) -> int:
     manifest_source = args.manifest
+    manifest_path = None
 
     # 1. Load manifest
     try:
         if Path(manifest_source).exists():
+            manifest_path = Path(manifest_source)
             manifest = SwarmManifest.from_file(manifest_source)
         else:
             manifest = load_manifest(manifest_source)
@@ -439,7 +474,7 @@ async def _async_run(args: argparse.Namespace) -> int:
         _attach_hooks(node, script_mod)
 
     # 6. Telemetry wiring
-    _attach_telemetry(node, args)
+    _attach_telemetry(node, args, manifest_path=manifest_path)
 
     # 7. Checkpoint / resume (spec §11.4, §11.8 — persistent state lives
     # under --checkpoint-dir; --resume re-seeds the model from the most

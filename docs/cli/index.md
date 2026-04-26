@@ -7,6 +7,7 @@ Complete reference for the `quinkgl` command-line interface.
 
 manifest
 run
+telemetry
 status
 info
 init

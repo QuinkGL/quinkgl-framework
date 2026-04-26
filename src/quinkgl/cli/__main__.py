@@ -96,6 +96,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     directory_cmd.build_parser(sub)
 
+    # telemetry
+    from . import telemetry_cmd
+
+    telemetry_cmd.build_parser(sub)
+
     return parser
 
 
@@ -122,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "publish": "directory_cmd",
         "query": "directory_cmd",
         "discover": "directory_cmd",
+        "telemetry": "telemetry_cmd",
     }
 
     mod_name = dispatch.get(args.command)

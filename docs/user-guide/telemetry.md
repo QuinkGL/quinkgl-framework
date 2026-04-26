@@ -42,16 +42,49 @@ VPS; peer operators only need the URL and a shared secret to connect.
 
 ## Peer-Side Wiring
 
-The CLI attaches a `TelemetryClient` automatically when `--telemetry-url` is
-set:
+The CLI attaches a `TelemetryClient` automatically unless `--no-telemetry` or
+`QUINKGL_TELEMETRY_DISABLE=1` is set:
 
 ```bash
 quinkgl run \
   --manifest my-swarm.qgl \
-  --script peer_script.py \
-  --telemetry-url https://dash.quinkgl.io/api \
-  --telemetry-secret "$QUINKGL_TELEMETRY_SECRET"
+  --script peer_script.py
 ```
+
+The default telemetry origin is built into QuinkGL. A manifest can declare
+secret-free telemetry metadata:
+
+```json
+{
+  "telemetry": {
+    "dashboard_url": "https://dash.quinkgl.io",
+    "enrollment": "invite-required"
+  }
+}
+```
+
+The private ingest credential is separate from the manifest. For a manifest
+named `my-swarm.qgl`, enroll once:
+
+```bash
+quinkgl telemetry enroll my-swarm.qgl --dashboard-url https://dash.quinkgl.io
+```
+
+The enrollment response is written to `my-swarm.telemetry.qglkey`:
+
+```json
+{
+  "schema_version": 1,
+  "swarm_id": "<manifest-hash>",
+  "dashboard_url": "https://dash.quinkgl.io",
+  "ingest_token": "qgl_live_<private-token>"
+}
+```
+
+`quinkgl run` verifies that the `.qglkey` `swarm_id` matches the manifest hash
+before using the token. Advanced deployments can still override the origin
+with `QUINKGL_TELEMETRY_URL`; do not include `/api` because the client adds
+`/api/telemetry/events` and `/api/telemetry/heartbeats` internally.
 
 The client:
 
@@ -87,6 +120,29 @@ endpoints require the `X-QuinkGL-Telemetry-Secret` header when
 | `POST /api/telemetry/connection-status` | Yes | Ingest connection state |
 | `WS /api/stream` or `/api/ws` | No | Live updates |
 
+## Running the Backend
+
+Run the FastAPI telemetry backend on loopback and put Caddy, nginx, or another
+TLS proxy in front of it:
+
+```bash
+quinkgl telemetry serve --host 127.0.0.1 --port 8765 \
+  --cors-origin https://dash.quinkgl.io \
+  --token-file /etc/quinkgl/telemetry-tokens.json
+```
+
+For swarm-scoped tokens, provide a backend token file:
+
+Start the backend with `--token-file /etc/quinkgl/telemetry-tokens.json`.
+Open enrollment appends token hashes to that file automatically through
+`POST /api/telemetry/enroll`. When a token file is configured, ingest requests
+must present a token that matches the payload `swarm_id`; mismatches are
+rejected with `403`.
+
+For Caddy, route `/api/*` to the telemetry process and serve the React build
+for every other path. A public `502 Bad Gateway` from Caddy means the proxy is
+alive but the upstream process or port is wrong.
+
 ## Scaling Considerations
 
 The default server is **in-memory and single-process**.  For small-to-medium
@@ -102,9 +158,9 @@ and injecting it into `create_telemetry_app`.
 
 ## Security
 
-- **Auth**: Set `auth_secret` (or `QUINKGL_TELEMETRY_SECRET`) in production.
-  Without it, anyone who can reach the ingest endpoints can pollute your
-  telemetry data.
+- **Auth**: Use a swarm-scoped token file in production. Legacy deployments can
+  still set `auth_secret` or `QUINKGL_TELEMETRY_SECRET`; without credentials,
+  anyone who can reach the ingest endpoints can pollute your telemetry data.
 - **TLS**: Run the server behind HTTPS.  The secret header is sent on every
   request.
 - **CORS**: Restrict `cors_allow_origins` to your dashboard domain.

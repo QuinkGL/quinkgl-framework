@@ -19,10 +19,12 @@ from quinkgl.manifest import (
     ModelSpec,
     SwarmManifest,
     TaskSpec,
+    TelemetryConfig,
     format_magnet,
     load_manifest,
     parse_magnet,
 )
+from quinkgl.telemetry.api import DEFAULT_TELEMETRY_BASE_URL
 from quinkgl.manifest.errors import (
     ERR_CREATOR_NOT_TRUSTED,
     ERR_MANIFEST_DATA_POLICY,
@@ -76,6 +78,17 @@ def build_parser(sub: _SubParsersAction) -> None:
     create.add_argument("--expires-at", default=None)
     create.add_argument("--bootstrap-peer", action="append", default=[], help="host:port")
     create.add_argument("--tracker-tier", action="append", default=[], help="url1,url2")
+    create.add_argument(
+        "--telemetry-dashboard-url",
+        default=DEFAULT_TELEMETRY_BASE_URL,
+        help="Secret-free dashboard origin to place in the manifest.",
+    )
+    create.add_argument(
+        "--telemetry-enrollment",
+        choices=["invite-required", "none"],
+        default="invite-required",
+        help="Telemetry enrollment mode declared by the manifest.",
+    )
     create.add_argument("--sign-with", default=None)
     create.add_argument("--output", required=True)
 
@@ -200,6 +213,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
             expires_at=args.expires_at,
             bootstrap_peers=bootstrap_peers,
             tracker_urls=tracker_urls,
+            telemetry=TelemetryConfig(
+                dashboard_url=args.telemetry_dashboard_url,
+                enrollment=args.telemetry_enrollment,
+            ),
         )
         manifest.validate()
 
