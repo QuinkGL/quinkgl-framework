@@ -4,7 +4,7 @@ This tutorial walks you through creating your first swarm and running a peer.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - QuinkGL installed: `pip install quinkgl`
 
 ## Step 1: Create a Manifest

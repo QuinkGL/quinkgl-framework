@@ -1,7 +1,7 @@
 # QuinkGL: Decentralized Gossip Learning Framework
 
 [![PyPI version](https://badge.fury.io/py/quinkgl.svg)](https://badge.fury.io/py/quinkgl)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **QuinkGL** is a fully **decentralized, peer-to-peer (P2P) federated learning framework** that enables collaborative model training across distributed devices without relying on a central parameter server. Built on gossip-based protocols, QuinkGL addresses the core challenges of decentralized learning: **communication efficiency**, **non-IID data heterogeneity**, and **Byzantine fault tolerance**.
@@ -419,7 +419,7 @@ QuinkGL supports personalization techniques to handle statistical heterogeneity:
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - PyTorch 1.9+ (optional, for `PyTorchModel`)
 - TensorFlow 2.x (optional, for `TensorFlowModel`)
 - IPv8 2.0+ (for P2P networking)

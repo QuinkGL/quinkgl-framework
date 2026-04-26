@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -64,14 +64,9 @@ jobs:
 
       - name: Run test gate (stable subset)
         # Tam koleksiyon kod/test hizalaması yenilenene kadar PR ve matriste bu alt-küme kullanılır.
-        run: |
-          pytest --tb=short -q \
-            tests/test_package_metadata.py \
-            tests/cli \
-            tests/docs \
-            tests/manifest \
-            tests/telemetry \
-            tests/api
+        # Tek satır: Windows runners varsayılan pwsh ile \ satır devamı yok; parçalanınca pytest
+        # bazen sürücü kökünden toplamaya kalkışıp PermissionError üretebiliyor.
+        run: pytest --tb=short -q tests/test_package_metadata.py tests/cli tests/docs tests/manifest tests/telemetry tests/api
 
       - name: Build distribution
         run: python -m build

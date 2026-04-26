@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 keywords = ["gossip-learning", "federated-learning", "p2p", "decentralized-ai", "ipv8"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     # Core numerical computing
     "numpy>=1.26,<3",
@@ -73,6 +73,9 @@ all = [
 "Homepage" = "https://github.com/QuinkGL"
 "Bug Tracker" = "https://github.com/QuinkGL/quinkgl-framework/issues"
 "Documentation" = "https://github.com/QuinkGL/quinkgl-framework/blob/main/README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 "quinkgl.cli.templates" = ["**/*.tmpl"]

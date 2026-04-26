@@ -1,5 +1,5 @@
 # QuinkGL Requirements
-# Python 3.9+ required
+# Python 3.10+ required (pyipv8 / IPv8 uses typing features from 3.10+)
 #
 # This file is auto-generated from pyproject.toml dependencies.
 # For development, use: pip install -e ".[dev]"
