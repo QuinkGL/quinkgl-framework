@@ -12,9 +12,9 @@ from pathlib import Path
 
 from quinkgl.cli.exit_codes import SUCCESS, VALIDATION_ERROR
 from quinkgl.manifest import SwarmManifest
-from quinkgl.telemetry.api import DEFAULT_TELEMETRY_BASE_URL
+from quinkgl.telemetry.api import DEFAULT_TELEMETRY_AUTH_HEADER, DEFAULT_TELEMETRY_BASE_URL
 from quinkgl.telemetry.api import TELEMETRY_AUTH_SECRET_ENV
-from quinkgl.telemetry.qglkey import default_qglkey_path
+from quinkgl.telemetry.qglkey import default_qglkey_path, load_qglkey
 from quinkgl.telemetry.server import (
     DEFAULT_TELEMETRY_MAX_REQUEST_BYTES,
     DEFAULT_TELEMETRY_RATE_LIMIT_MAX_REQUESTS,
@@ -98,13 +98,32 @@ def build_parser(sub: argparse._SubParsersAction) -> None:
     )
     enroll.add_argument("--overwrite", action="store_true", help="Replace an existing .qglkey file.")
 
+    dashboard_code = nested.add_parser(
+        "dashboard-code",
+        help="Create a short-lived dashboard login code for a swarm",
+    )
+    dashboard_code.add_argument("manifest", help="Path to the .qgl manifest")
+    dashboard_code.add_argument(
+        "--node-id",
+        default=None,
+        help="Node ID that is issuing the dashboard code.",
+    )
+    dashboard_code.add_argument(
+        "--dashboard-url",
+        default=None,
+        help="Telemetry dashboard origin. Defaults to the adjacent .telemetry.qglkey.",
+    )
 
-def _post_json(url: str, payload: dict) -> dict:
+
+def _post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
     body = json.dumps(payload).encode("utf-8")
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     try:
@@ -165,9 +184,51 @@ def _run_enroll(args: argparse.Namespace) -> int:
     return SUCCESS
 
 
+def _request_dashboard_code(
+    *,
+    manifest_path: Path,
+    node_id: str | None = None,
+    dashboard_url: str | None = None,
+) -> tuple[str, dict]:
+    manifest = SwarmManifest.from_file(manifest_path)
+    swarm_id = manifest.manifest_hash()
+    qglkey = load_qglkey(default_qglkey_path(manifest_path), expected_swarm_id=swarm_id)
+    base_url = (dashboard_url or qglkey.dashboard_url or DEFAULT_TELEMETRY_BASE_URL).rstrip("/")
+    payload = {"swarm_id": swarm_id, "node_id": node_id}
+    response = _post_json(
+        f"{base_url}/api/dashboard/codes",
+        payload,
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: qglkey.ingest_token},
+    )
+    code = response.get("code")
+    if not isinstance(code, str) or not code:
+        raise RuntimeError("dashboard code response did not include code")
+    return code, response
+
+
+def _run_dashboard_code(args: argparse.Namespace) -> int:
+    try:
+        code, response = _request_dashboard_code(
+            manifest_path=Path(args.manifest),
+            node_id=args.node_id,
+            dashboard_url=args.dashboard_url,
+        )
+    except Exception as exc:
+        print(f"Error: failed to create dashboard code: {exc}")
+        return VALIDATION_ERROR
+    print(f"Dashboard code: {code}")
+    scope = response.get("scope") if isinstance(response, dict) else None
+    expires_at = scope.get("expires_at") if isinstance(scope, dict) else None
+    if expires_at:
+        print(f"Expires at: {expires_at}")
+    return SUCCESS
+
+
 def run(args: argparse.Namespace) -> int:
     if getattr(args, "telemetry_command", None) == "enroll":
         return _run_enroll(args)
+    if getattr(args, "telemetry_command", None) == "dashboard-code":
+        return _run_dashboard_code(args)
     if getattr(args, "telemetry_command", None) != "serve":
         return VALIDATION_ERROR
 

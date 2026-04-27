@@ -7,6 +7,7 @@ Run telemetry backend utilities for the QuinkGL dashboard.
 ```bash
 quinkgl telemetry serve [options]
 quinkgl telemetry enroll <manifest.qgl> [options]
+quinkgl telemetry dashboard-code <manifest.qgl> [options]
 ```
 
 ## Description
@@ -19,6 +20,10 @@ and authenticated ingest endpoints.
 writes a private `.telemetry.qglkey` file next to the manifest. That key lets
 `quinkgl run` send telemetry for the matching swarm without manually exporting
 a global secret.
+
+`quinkgl telemetry dashboard-code` creates a short-lived login code for the
+React dashboard. The code grants read-only access to the swarm associated with
+the manifest; it does not expose the private ingest token to the browser.
 
 ## `serve` Flags
 
@@ -41,6 +46,14 @@ a global secret.
 | `--dashboard-url` | manifest telemetry URL or hosted default | Dashboard origin. Do not include `/api`. |
 | `--output` | `<manifest>.telemetry.qglkey` | Output key file path. |
 | `--overwrite` | false | Replace an existing `.qglkey` file. |
+
+## `dashboard-code` Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<manifest.qgl>` | required | Manifest whose swarm should be opened in the dashboard. |
+| `--node-id` | — | Node ID issuing the code. Used for audit/debug context. |
+| `--dashboard-url` | adjacent `.telemetry.qglkey` URL or hosted default | Dashboard origin. Do not include `/api`. |
 
 ## Examples
 
@@ -75,6 +88,21 @@ Run the peer normally after enrollment:
 
 ```bash
 quinkgl run --manifest my-swarm.qgl --script peer_script.py
+```
+
+When an adjacent `.telemetry.qglkey` exists, `quinkgl run` also prints a
+short-lived dashboard code. Paste that code into the dashboard login page to
+view only this swarm's telemetry:
+
+```text
+Dashboard code: QGL-ABCD-1234
+Open the telemetry dashboard login page and paste this code.
+```
+
+You can also request a code without starting a peer:
+
+```bash
+quinkgl telemetry dashboard-code my-swarm.qgl --node-id peer-1
 ```
 
 ## Exit Codes

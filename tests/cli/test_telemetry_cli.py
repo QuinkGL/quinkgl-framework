@@ -152,3 +152,71 @@ def test_telemetry_enroll_writes_adjacent_qglkey(tmp_path, monkeypatch):
     assert captured["url"] == "https://dash.example.com/api/telemetry/enroll"
     assert captured["payload"]["swarm_id"] == manifest.manifest_hash()
     assert qglkey["ingest_token"] == "qgl_live_from_enroll"
+
+
+def test_telemetry_dashboard_code_uses_adjacent_qglkey(tmp_path, monkeypatch, capsys):
+    manifest = SwarmManifest(
+        name="dashboard-swarm",
+        model_arch_fingerprint="sha256:" + "1" * 64,
+        data_schema_hash="sha256:" + "2" * 64,
+        task=TaskSpec(
+            type="classification",
+            input_shape=[1],
+            output_shape=[1],
+            label_type="integer",
+        ),
+        model=ModelSpec(framework="pytorch", arch_hash="sha256:" + "1" * 64),
+    )
+    manifest_path = tmp_path / "my-swarm.qgl"
+    manifest.to_file(manifest_path, pretty=True)
+    (tmp_path / "my-swarm.telemetry.qglkey").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "swarm_id": manifest.manifest_hash(),
+                "dashboard_url": "https://dash.example.com",
+                "ingest_token": "qgl_live_from_key",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_post_json(url, payload, headers=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["headers"] = headers
+        return {
+            "code": "QGL-ABCD-1234",
+            "scope": {
+                "swarm_id": payload["swarm_id"],
+                "issued_from_node_id": payload["node_id"],
+                "expires_at": "2026-04-27T12:00:00",
+            },
+        }
+
+    from quinkgl.cli import telemetry_cmd
+
+    monkeypatch.setattr(telemetry_cmd, "_post_json", fake_post_json)
+
+    assert (
+        main(
+            [
+                "telemetry",
+                "dashboard-code",
+                str(manifest_path),
+                "--node-id",
+                "peer-1",
+            ]
+        )
+        == SUCCESS
+    )
+
+    output = capsys.readouterr().out
+    assert captured["url"] == "https://dash.example.com/api/dashboard/codes"
+    assert captured["payload"] == {
+        "swarm_id": manifest.manifest_hash(),
+        "node_id": "peer-1",
+    }
+    assert captured["headers"] == {"X-QuinkGL-Telemetry-Secret": "qgl_live_from_key"}
+    assert "Dashboard code: QGL-ABCD-1234" in output

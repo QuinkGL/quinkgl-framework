@@ -261,6 +261,34 @@ def _attach_telemetry(
     log.info("TelemetryClient wired to %s", base_url)
 
 
+def _maybe_print_dashboard_code(
+    args: argparse.Namespace,
+    *,
+    manifest_path: str | Path | None,
+) -> None:
+    if getattr(args, "no_telemetry", False) or manifest_path is None:
+        return
+    key_path = default_qglkey_path(manifest_path)
+    if not key_path.exists():
+        return
+    try:
+        from quinkgl.cli.telemetry_cmd import _request_dashboard_code
+
+        code, response = _request_dashboard_code(
+            manifest_path=Path(manifest_path),
+            node_id=getattr(args, "node_id", None),
+        )
+    except Exception as exc:
+        log.warning("Failed to create dashboard code: %s", exc)
+        return
+    print(f"Dashboard code: {code}", flush=True)
+    print("Open the telemetry dashboard login page and paste this code.", flush=True)
+    scope = response.get("scope") if isinstance(response, dict) else None
+    expires_at = scope.get("expires_at") if isinstance(scope, dict) else None
+    if expires_at:
+        print(f"Dashboard code expires at: {expires_at}", flush=True)
+
+
 def _attach_hooks(node: GossipNode, mod: Any) -> None:
     """Attach optional user-script callbacks to GossipNode hooks (§10.5.5)."""
     # ``on_round_end`` is handled directly by _build_on_round_end so the
@@ -475,6 +503,7 @@ async def _async_run(args: argparse.Namespace) -> int:
 
     # 6. Telemetry wiring
     _attach_telemetry(node, args, manifest_path=manifest_path)
+    _maybe_print_dashboard_code(args, manifest_path=manifest_path)
 
     # 7. Checkpoint / resume (spec §11.4, §11.8 — persistent state lives
     # under --checkpoint-dir; --resume re-seeds the model from the most
