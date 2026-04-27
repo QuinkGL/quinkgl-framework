@@ -272,6 +272,105 @@ def test_api_open_enrollment_persists_swarm_token_and_returns_qglkey(tmp_path):
     assert accepted.status_code == 202
 
 
+def test_dashboard_code_login_returns_swarm_scoped_viewer_token():
+    from quinkgl.telemetry.tokens import TelemetryTokenRegistry
+
+    registry = TelemetryTokenRegistry.from_plain_tokens(
+        [{"swarm_id": "swarm-1", "token": "qgl_live_swarm_1"}]
+    )
+    app = create_telemetry_app(
+        store=TelemetryStore(session_id="session-1"),
+        token_registry=registry,
+    )
+    client = TestClient(app)
+
+    code_response = client.post(
+        "/api/dashboard/codes",
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: "qgl_live_swarm_1"},
+        json={"swarm_id": "swarm-1", "node_id": "node-a"},
+    )
+    assert code_response.status_code == 201
+    code = code_response.json()["code"]
+    assert code.startswith("QGL-")
+
+    login_response = client.post("/api/dashboard/login", json={"code": code})
+    assert login_response.status_code == 200
+    body = login_response.json()
+    assert body["scope"]["swarm_id"] == "swarm-1"
+    assert body["scope"]["issued_from_node_id"] == "node-a"
+    assert body["viewer_token"].startswith("qgl_view_")
+
+    reused = client.post("/api/dashboard/login", json={"code": code})
+    assert reused.status_code == 401
+
+
+def test_viewer_token_filters_rest_api_to_authorized_swarm():
+    from quinkgl.telemetry.tokens import TelemetryTokenRegistry
+
+    registry = TelemetryTokenRegistry.from_plain_tokens(
+        [
+            {"swarm_id": "swarm-1", "token": "qgl_live_swarm_1"},
+            {"swarm_id": "swarm-2", "token": "qgl_live_swarm_2"},
+        ]
+    )
+    store = TelemetryStore(session_id="session-1")
+    app = create_telemetry_app(store=store, token_registry=registry)
+    client = TestClient(app)
+
+    for swarm_id, token, node_id in (
+        ("swarm-1", "qgl_live_swarm_1", "node-a"),
+        ("swarm-2", "qgl_live_swarm_2", "node-b"),
+    ):
+        client.post(
+            "/api/telemetry/heartbeats",
+            headers={DEFAULT_TELEMETRY_AUTH_HEADER: token},
+            json={
+                "node_id": node_id,
+                "domain": "demo",
+                "running": True,
+                "known_peers": ["node-b" if node_id == "node-a" else "node-a"],
+                "swarm_id": swarm_id,
+            },
+        )
+        client.post(
+            "/api/telemetry/events",
+            headers={DEFAULT_TELEMETRY_AUTH_HEADER: token},
+            json={
+                "event_type": "training_completed",
+                "payload": {
+                    "node_id": node_id,
+                    "swarm_id": swarm_id,
+                    "round": 1,
+                    "loss": 0.1,
+                },
+            },
+        )
+
+    unauthenticated = client.get("/api/nodes")
+    assert unauthenticated.status_code == 401
+
+    code = client.post(
+        "/api/dashboard/codes",
+        headers={DEFAULT_TELEMETRY_AUTH_HEADER: "qgl_live_swarm_1"},
+        json={"swarm_id": "swarm-1", "node_id": "node-a"},
+    ).json()["code"]
+    viewer_token = client.post("/api/dashboard/login", json={"code": code}).json()["viewer_token"]
+    headers = {"Authorization": f"Bearer {viewer_token}"}
+
+    nodes = client.get("/api/nodes", headers=headers).json()
+    events = client.get("/api/events", headers=headers).json()
+    graph = client.get("/api/network/graph", headers=headers).json()
+    swarms = client.get("/api/swarms", headers=headers).json()
+    session = client.get("/api/session", headers=headers).json()
+
+    assert [node["node_id"] for node in nodes] == ["node-a"]
+    assert [event["node_id"] for event in events] == ["node-a"]
+    assert [node["node_id"] for node in graph["nodes"]] == ["node-a"]
+    assert graph["edges"] == []
+    assert [swarm["swarm_id"] for swarm in swarms] == ["swarm-1"]
+    assert session["active_node_count"] == 1
+
+
 def test_api_accepts_custom_auth_header_name_for_ingest():
     app = create_telemetry_app(
         store=TelemetryStore(session_id="session-1"),

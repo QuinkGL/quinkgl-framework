@@ -2,8 +2,9 @@
 
 QuinkGL includes a built-in telemetry subsystem for fleet-wide observability.
 Each peer forwards runtime events and periodic heartbeats to a central
-dashboard.  The dashboard is a separate React application hosted on an Oracle
-VPS; peer operators only need the URL and a shared secret to connect.
+dashboard backend. The dashboard is a separate React application; peer
+operators enroll a manifest once, run peers with the generated `.qglkey`, and
+paste a short-lived terminal code into the website to view that swarm.
 
 ## Architecture
 
@@ -86,6 +87,20 @@ before using the token. Advanced deployments can still override the origin
 with `QUINKGL_TELEMETRY_URL`; do not include `/api` because the client adds
 `/api/telemetry/events` and `/api/telemetry/heartbeats` internally.
 
+When the `.qglkey` is present, `quinkgl run` asks the backend for a dashboard
+login code and prints it in the terminal:
+
+```text
+Dashboard code: QGL-ABCD-1234
+Open the telemetry dashboard login page and paste this code.
+```
+
+The code is short-lived and single-use. It exchanges for a read-only viewer
+token scoped to the manifest hash (`swarm_id`). The website can then show all
+peers, events, rounds, topology, and aggregation activity for that swarm, but
+not any other swarm on the same telemetry backend. The browser never receives
+the private `ingest_token`.
+
 The client:
 
 1. Listens to every `RuntimeEvent` emitted by the peer (training completed,
@@ -100,25 +115,29 @@ The client:
 
 ## Server Endpoints
 
-All query endpoints are read-only and require no authentication.  Ingest
-endpoints require the `X-QuinkGL-Telemetry-Secret` header when
-`auth_secret` is set.
+When `--token-file` is configured, ingest endpoints require the
+`X-QuinkGL-Telemetry-Secret` header with a swarm-scoped ingest token, and
+dashboard read endpoints require `Authorization: Bearer <viewer-token>`.
+The viewer token is obtained by posting a terminal dashboard code to
+`/api/dashboard/login`.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `GET /api/session` | No | Session metadata |
-| `GET /api/nodes` | No | All node snapshots |
-| `GET /api/nodes/{id}` | No | Single node |
-| `GET /api/nodes/{id}/events` | No | Event history |
-| `GET /api/events` | No | All events |
-| `GET /api/nodes/{id}/rounds` | No | Per-round summaries |
-| `GET /api/rounds` | No | All rounds |
-| `GET /api/network/graph` | No | Topology graph |
-| `GET /api/network/stats` | No | Aggregate stats |
+| `POST /api/dashboard/codes` | Ingest token | Create a short-lived dashboard code |
+| `POST /api/dashboard/login` | Dashboard code | Exchange code for a viewer token |
+| `GET /api/session` | Viewer token | Swarm-scoped session metadata |
+| `GET /api/nodes` | Viewer token | Swarm-scoped node snapshots |
+| `GET /api/nodes/{id}` | Viewer token | Single authorized node |
+| `GET /api/nodes/{id}/events` | Viewer token | Event history |
+| `GET /api/events` | Viewer token | Swarm-scoped events |
+| `GET /api/nodes/{id}/rounds` | Viewer token | Per-round summaries |
+| `GET /api/rounds` | Viewer token | Swarm-scoped rounds |
+| `GET /api/network/graph` | Viewer token | Swarm topology graph |
+| `GET /api/network/stats` | Viewer token | Swarm aggregate stats |
 | `POST /api/telemetry/events` | Yes | Ingest event |
 | `POST /api/telemetry/heartbeats` | Yes | Ingest heartbeat |
 | `POST /api/telemetry/connection-status` | Yes | Ingest connection state |
-| `WS /api/stream` or `/api/ws` | No | Live updates |
+| `WS /api/stream` or `/api/ws` | Viewer token | Live swarm updates |
 
 ## Running the Backend
 
