@@ -12,7 +12,7 @@ quinkgl info
 
 ```bash
 $ quinkgl info
-QuinkGL:            0.13.0
+QuinkGL:            0.3.4
 Manifest schema:    v4
 Python:             3.12.2
 IPv8:               2.14.0

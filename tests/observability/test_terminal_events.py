@@ -655,7 +655,7 @@ class TestLifecycleEventFormatting:
             event_type="node.config",
             payload={
                 "node_id": "alice",
-                "version": "0.2.8",
+                "version": "0.3.4",
                 "domain": "health",
                 "port": 7000,
                 "topology": "AffinityTopology",
@@ -668,7 +668,7 @@ class TestLifecycleEventFormatting:
             },
         )
         output = format_runtime_event(event)
-        assert "QuinkGL v0.2.8" in output
+        assert "QuinkGL v0.3.4" in output
         assert "alice" in output
         assert "health" in output
         assert "AffinityTopology" in output
@@ -681,7 +681,7 @@ class TestLifecycleEventFormatting:
             event_type="node.config",
             payload={
                 "node_id": "bob",
-                "version": "0.2.8",
+                "version": "0.3.4",
                 "domain": "demo",
                 "port": 8000,
                 "topology": "RandomTopology",
@@ -747,7 +747,7 @@ class TestLifecycleEventFormatting:
             event_type="node.config",
             payload={
                 "node_id": "n1",
-                "version": "0.2.8",
+                "version": "0.3.4",
                 "domain": "test",
                 "port": 0,
                 "topology": "RandomTopology",
@@ -761,7 +761,7 @@ class TestLifecycleEventFormatting:
         )
         observer.handle(event)
         assert len(lines) == 1
-        assert "QuinkGL v0.2.8" in lines[0]
+        assert "QuinkGL v0.3.4" in lines[0]
 
     def test_auto_observer_via_emitter(self):
         """Verify that emitting node.config through EventEmitter reaches TerminalObserver."""
