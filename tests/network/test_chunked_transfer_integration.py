@@ -218,3 +218,37 @@ class TestChunkedTransferNACKRecovery:
         # creating a new one.
         assert result is True
         assert len(sender._outgoing_transfers) == 1
+
+
+@pytest.mark.asyncio
+async def test_broadcast_model_update_awaits_each_send():
+    community = object.__new__(GossipLearningCommunity)
+    community.known_peers = {"peer-a": object(), "peer-b": object()}
+    sent_to = []
+
+    async def send_model_update(
+        node_id,
+        weights,
+        sample_count,
+        round_number,
+        loss,
+        accuracy,
+    ):
+        sent_to.append(
+            (node_id, weights, sample_count, round_number, loss, accuracy)
+        )
+        return node_id == "peer-a"
+
+    community.send_model_update = send_model_update
+
+    sent_count = await GossipLearningCommunity.broadcast_model_update(
+        community,
+        {"w": [1.0]},
+        8,
+        5,
+        0.1,
+        0.9,
+    )
+
+    assert sent_count == 1
+    assert [entry[0] for entry in sent_to] == ["peer-a", "peer-b"]

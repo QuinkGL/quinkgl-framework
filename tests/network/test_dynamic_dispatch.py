@@ -57,6 +57,22 @@ async def test_dispatch_uses_ipv8_when_p2p():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_raises_when_ipv8_send_reports_failure():
+    node = _make_node()
+    node.connection_mode = ConnectionMode.IPV8_P2P
+    node.community.send_model_update.return_value = False
+
+    await node.run_continuous(data=MagicMock())
+
+    callback = node.gl_node.aggregator.send_message_callback
+    assert callback is not None
+
+    msg = MagicMock()
+    with pytest.raises(RuntimeError, match="Failed to send model update"):
+        await callback("peer-1", msg)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_uses_tunnel_when_relay():
     node = _make_node()
     node.connection_mode = ConnectionMode.TUNNEL_RELAY

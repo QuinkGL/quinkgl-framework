@@ -811,7 +811,14 @@ class ModelAggregator:
 
         async def _send_to_peer(peer_id: str):
             try:
-                await self.send_message_callback(peer_id, model_message)
+                result = await self.send_message_callback(
+                    peer_id,
+                    model_message,
+                )
+                if result is False:
+                    raise RuntimeError(
+                        "send callback reported delivery failure"
+                    )
                 sent_peers.append(peer_id)
                 logger.debug(f"Sent model update to {peer_id}")
                 self.comm_log.append({

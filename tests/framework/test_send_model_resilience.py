@@ -167,6 +167,38 @@ async def test_model_sent_event_only_lists_successful_peers():
 
 
 @pytest.mark.asyncio
+async def test_false_callback_result_is_reported_as_failed_send():
+    """An explicit False result from the send callback is a failed delivery."""
+    agg = _make_aggregator()
+    events = []
+
+    emitter = EventEmitter()
+    emitter.subscribe(lambda e: events.append((e.event_type, dict(e.payload))))
+    agg.event_emitter = emitter
+
+    async def callback(peer_id, message):
+        if peer_id == "undelivered":
+            return False
+        return True
+
+    agg.send_message_callback = callback
+
+    await agg._send_model(
+        ["delivered", "undelivered"],
+        loss=0.1,
+        accuracy=0.9,
+        samples_trained=16,
+    )
+    await asyncio.sleep(0)
+
+    failed_events = [p for t, p in events if t == "model_send_failed"]
+    sent_events = [p for t, p in events if t == "model_sent"]
+
+    assert failed_events[0]["failed_peers"] == ["undelivered"]
+    assert sent_events[0]["peer_ids"] == ["delivered"]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_send_is_faster_than_sequential():
     """asyncio.gather should run sends concurrently, not sequentially."""
     agg = _make_aggregator()

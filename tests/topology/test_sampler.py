@@ -4,7 +4,12 @@ Tests for topology sampler strategies.
 
 import pytest
 import numpy as np
-from quinkgl.topology.sampler import RandomSampler, DegreeWeightedSampler
+from quinkgl.topology.base import PeerInfo
+from quinkgl.topology.sampler import (
+    DegreeWeightedSampler,
+    PeerSampler,
+    RandomSampler,
+)
 
 
 def test_random_sampler_selects_correct_count():
@@ -70,3 +75,23 @@ def test_sampler_handles_k_larger_than_peers():
     
     # Should return all peers when k > len(peers) without replacement
     assert len(selected) == 3
+
+
+@pytest.mark.asyncio
+async def test_peer_sampler_select_random_peers_uses_seeded_rng():
+    sampler_a = PeerSampler(seed=7)
+    sampler_b = PeerSampler(seed=7)
+    for sampler in (sampler_a, sampler_b):
+        for index in range(5):
+            await sampler.add_peer(
+                PeerInfo(
+                    peer_id=f"p{index}",
+                    domain="demo",
+                    data_schema_hash="schema",
+                )
+            )
+
+    first = await sampler_a.select_random_peers(3)
+    second = await sampler_b.select_random_peers(3)
+
+    assert [peer.peer_id for peer in first] == [peer.peer_id for peer in second]

@@ -2747,7 +2747,7 @@ class GossipLearningCommunity(Community):
             logger.error(f"Failed to send model update: {e}")
             return False
 
-    def broadcast_model_update(
+    async def broadcast_model_update(
         self,
         weights: Any,
         sample_count: int,
@@ -2771,7 +2771,14 @@ class GossipLearningCommunity(Community):
         sent_count = 0
 
         for node_id in self.known_peers:
-            if self.send_model_update(node_id, weights, sample_count, round_number, loss, accuracy):
+            if await self.send_model_update(
+                node_id,
+                weights,
+                sample_count,
+                round_number,
+                loss,
+                accuracy,
+            ):
                 sent_count += 1
 
         logger.debug(f"Broadcast model update to {sent_count} peers")

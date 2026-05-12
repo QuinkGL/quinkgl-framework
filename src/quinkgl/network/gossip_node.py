@@ -1278,7 +1278,7 @@ class GossipNode:
 
         async def send_to_peer(peer_id: str, message):
             if self.connection_mode == ConnectionMode.IPV8_P2P:
-                await self.community.send_model_update(
+                sent = await self.community.send_model_update(
                     target_node_id=peer_id,
                     weights=message.weights,
                     sample_count=message.sample_count,
@@ -1287,7 +1287,12 @@ class GossipNode:
                     accuracy=message.accuracy,
                 )
             else:
-                await self._send_model_update_via_tunnel(peer_id, message)
+                sent = await self._send_model_update_via_tunnel(peer_id, message)
+
+            if sent is False:
+                raise RuntimeError(f"Failed to send model update to {peer_id}")
+
+            return sent
 
         self.gl_node.aggregator.send_message_callback = send_to_peer
         self._configure_local_fingerprint_runtime()
@@ -1378,6 +1383,7 @@ class GossipNode:
 
         except Exception as e:
             logger.error(f"Failed to send model update via tunnel: {e}")
+            raise
 
     async def _announce_to_tunnel(self):
         """Announce ourselves to other peers via tunnel."""

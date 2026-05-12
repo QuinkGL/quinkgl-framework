@@ -11,6 +11,7 @@ Features:
 """
 import asyncio
 import logging
+import random
 from typing import List, Optional, Dict
 from quinkgl.topology.base import PeerInfo
 
@@ -83,6 +84,7 @@ class PeerSampler:
         self.view: Dict[str, PeerInfo] = {} 
         self._lock: asyncio.Lock = asyncio.Lock()
         self._seed: Optional[int] = seed
+        self._rng = random.Random(seed)
 
     async def add_peer(self, peer: PeerInfo) -> bool:
         """
