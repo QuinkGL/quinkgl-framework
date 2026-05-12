@@ -6,6 +6,7 @@ QuinkGL implements rate limits to prevent denial-of-service attacks.
 
 | Limit | Value | Behavior |
 |---|---|---|
+| Per-round model fanout | 3 targets up to 100 compatible peers; 5 up to 250; 7 up to 500; 10 above 500 | Caps concurrent outbound model transfers per peer |
 | Chunk payload size | 1024 bytes | Keeps UDP datagrams below typical MTU ceilings |
 | Transfer timeout | 900 seconds | Incomplete transfer is abandoned |
 | Max chunks per transfer | 300,000 | Oversized transfer rejected |

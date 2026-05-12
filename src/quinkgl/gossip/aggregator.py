@@ -7,7 +7,7 @@ training, peer selection, model exchange, and aggregation.
 
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import Any, List, Optional, Callable, Dict
 from datetime import datetime
 
@@ -19,7 +19,7 @@ from quinkgl.aggregation.base import AggregationStrategy, ModelUpdate, Aggregate
 from quinkgl.models.base import ModelWrapper, TrainingConfig
 from quinkgl.observability.events import EventEmitter
 from quinkgl.gossip.consensus import ConsensusTracker, PeerCheckpoint
-from quinkgl.training.convergence import ConvergenceMonitor, ConvergenceConfig, ConvergenceStatus
+from quinkgl.training.convergence import ConvergenceMonitor, ConvergenceConfig
 from quinkgl.training.quality import compute_peer_similarity, compute_weight_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,21 @@ class ModelAggregator:
 
     Manages the training → gossip → aggregation cycle.
     """
+
+    @staticmethod
+    def _select_fanout(candidate_count: int) -> int:
+        """Return adaptive per-round outbound model-transfer fanout."""
+        if candidate_count <= 0:
+            return 0
+        if candidate_count < 3:
+            return candidate_count
+        if candidate_count <= 100:
+            return 3
+        if candidate_count <= 250:
+            return 5
+        if candidate_count <= 500:
+            return 7
+        return 10
 
     def __init__(
         self,
@@ -691,7 +706,7 @@ class ModelAggregator:
         if hasattr(self.aggregator, 'get_training_config_overrides'):
             overrides = self.aggregator.get_training_config_overrides()
             if overrides:
-                allowed_override_keys = TrainingConfig.__dataclass_fields__.keys()
+                allowed_override_keys = {field.name for field in fields(TrainingConfig)}
                 filtered_overrides = {
                     key: value
                     for key, value in overrides.items()
@@ -991,9 +1006,10 @@ class ModelAggregator:
             self._local_fingerprint_update_callback(fingerprint)
 
     def _refresh_local_fingerprint(self) -> None:
-        if self._local_fingerprint_provider is None:
+        provider = self._local_fingerprint_provider
+        if not callable(provider):
             return
-        fingerprint = self._local_fingerprint_provider(self.current_round)
+        fingerprint = provider(self.current_round)
         self._set_local_fingerprint(fingerprint)
 
     async def run_continuous(self, data_provider=None, eval_data_provider=None):
@@ -1127,13 +1143,15 @@ class ModelAggregator:
                         my_manifest_id=my_manifest_id,
                     )
                     candidate_count = len(context.get_compatible_peers(exclude_self=True))
-                    targets = await self.topology.select_targets(context, count=3)
+                    fanout = self._select_fanout(candidate_count)
+                    targets = await self.topology.select_targets(context, count=fanout)
                     self._emit_event(
                         "targets_selected",
                         {
                             "node_id": self.peer_id,
                             "round": self.current_round,
                             "candidate_count": candidate_count,
+                            "fanout": fanout,
                             "selected_targets": list(targets),
                         },
                     )

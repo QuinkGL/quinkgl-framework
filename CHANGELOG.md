@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry documentation updated to reflect the actual implementation: endpoint paths are `/api/telemetry/events`, `/api/telemetry/heartbeats`, and `/api/stream` (not the older `/v1/…` paths); auth uses `X-QuinkGL-Telemetry-Secret` by default; dashboard is a separate hosted application rather than a user-installed component.
 - `quinkgl run` telemetry heartbeats now default to 60 seconds to reduce routine HTTP log noise during long-running peer sessions.
 - Chunked model transfer now uses ACK/window flow control for large payloads, longer transfer timeouts, sender-side retry state, and throttled receiver NACK reports. Active ACK/window transfers no longer consume the legacy NACK resend budget for normal missing-chunk reports.
+- Gossip target selection now uses adaptive fanout based on compatible peer count: 3 targets up to 100 peers, 5 up to 250, 7 up to 500, and 10 above 500.
 
 ### Removed
 
