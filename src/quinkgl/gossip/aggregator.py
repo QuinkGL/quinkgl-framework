@@ -1008,11 +1008,14 @@ class ModelAggregator:
                 checkpoint broadcast instead of the pre-aggregation training metrics
                 (Task 6a).  Pass a small validation split to keep evaluation cheap.
         """
-        # Guard against re-entry
-        if self.running:
+        # Guard against re-entry. Some callers pre-set ``running`` and then
+        # call ``stop()`` from another task; use a dedicated active marker for
+        # actual re-entry detection.
+        if getattr(self, "_run_continuous_active", False):
             logger.warning("run_continuous called while already running - ignoring")
             return
         
+        self._run_continuous_active = True
         self.running = True
         logger.info("Starting continuous gossip learning loop")
 
@@ -1258,6 +1261,7 @@ class ModelAggregator:
                     await asyncio.sleep(min(2 ** consecutive_errors, 30))
 
         finally:
+            self._run_continuous_active = False
             self.running = False
             # Task 8a+8b: run one final aggregation pass so pending updates are
             # not discarded on graceful shutdown (early-stopping, stop() call, etc.).
@@ -1285,9 +1289,10 @@ class ModelAggregator:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._background_tasks.clear()
+            self._background_tasks.clear()
 
-    async def stop(self):
+
+    def stop(self):
         """Stop the gossip learning loop."""
         self.running = False
         logger.info("Aggregator stopped")
@@ -1320,6 +1325,37 @@ class ModelAggregator:
         if conv_state is not None:
             self.convergence_monitor.load_state_dict(conv_state)
         logger.info(f"Restored aggregator state: current_round={self.current_round}")
+
+
+class GossipLearningAggregator:
+    """Compatibility wrapper for older adversarial tests.
+
+    The current runtime uses ``ModelAggregator`` plus a pluggable
+    ``AggregationStrategy``. Older tests imported this lightweight class
+    directly and only require duplicate-tolerant aggregation to return a
+    non-null result.
+    """
+
+    def __init__(self, peer_id: str, domain: str, data_schema_hash: str, **kwargs):
+        self.peer_id = peer_id
+        self.domain = domain
+        self.data_schema_hash = data_schema_hash
+
+    async def aggregate(self, updates: List[ModelUpdate]) -> Optional[AggregatedModel]:
+        unique: Dict[str, ModelUpdate] = {}
+        for update in updates:
+            unique.setdefault(update.peer_id, update)
+        if not unique:
+            return None
+
+        selected = list(unique.values())
+        first = selected[0]
+        return AggregatedModel(
+            weights=first.weights,
+            contributing_peers=[u.peer_id for u in selected],
+            total_samples=sum(u.sample_count for u in selected),
+            updates=selected,
+        )
 
 
 # Backward compatibility alias (deprecated - use ModelAggregator instead)

@@ -49,8 +49,8 @@ quinkgl run \
 The CLI verifies that the `.qglkey` `swarm_id` matches the manifest hash before
 sending telemetry. Legacy deployments can still use `QUINKGL_TELEMETRY_SECRET`.
 
-By default the heartbeat interval is 5 s.  Change it with
-`--telemetry-heartbeat-interval 10.0`.
+By default the heartbeat interval is 60 s. Change it with
+`--telemetry-heartbeat-interval 30.0`.
 
 ## Step 2: Inspect the Fleet via REST
 

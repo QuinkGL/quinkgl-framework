@@ -14,8 +14,14 @@ from unittest.mock import MagicMock
 from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
     ChunkBuffer,
+    CHUNK_TRANSFER_TIMEOUT,
     EARLY_NACK_AGE_THRESHOLD,
+    NACK_BUCKET_INTERVAL,
     NACK_BUCKET_MAX_TOKENS,
+    NACK_MAX_RESENDS_PER_TRANSFER,
+    NACK_TRANSFER_BUCKET_INTERVAL,
+    NACK_TRANSFER_BUCKET_MAX_TOKENS,
+    RECEIVER_NACK_REPORT_INTERVAL,
 )
 
 
@@ -35,6 +41,7 @@ def _make_community():
     # Bind real methods
     community._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(community)
     community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
+    community._send_missing_chunks_report = GossipLearningCommunity._send_missing_chunks_report.__get__(community)
     community._nack_incomplete_buffers = GossipLearningCommunity._nack_incomplete_buffers.__get__(community)
     community.metrics = {
         'chunk_transfers_started': 0,
@@ -56,6 +63,17 @@ def _add_peer(community, node_id, mid_hex):
     peer_info.node_id = node_id
     community.known_peers[node_id] = peer_info
     return peer
+
+
+def test_large_model_transfer_reliability_tuning_constants():
+    assert CHUNK_TRANSFER_TIMEOUT == 900
+    assert NACK_MAX_RESENDS_PER_TRANSFER == 20
+    assert NACK_BUCKET_MAX_TOKENS == 40
+    assert NACK_BUCKET_INTERVAL == 2.0
+    assert NACK_TRANSFER_BUCKET_MAX_TOKENS == 20
+    assert NACK_TRANSFER_BUCKET_INTERVAL == 2.0
+    assert EARLY_NACK_AGE_THRESHOLD == 10.0
+    assert RECEIVER_NACK_REPORT_INTERVAL == 30.0
 
 
 class TestEarlyNACK:
@@ -144,3 +162,24 @@ class TestEarlyNACK:
         await community._nack_incomplete_buffers()
 
         community.ez_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_same_missing_set_is_throttled(self):
+        """Repeated NACK reports for unchanged missing chunks are suppressed."""
+        community = _make_community()
+        mid = "ee" * 20
+        _add_peer(community, "node-e", mid)
+
+        buf = ChunkBuffer(
+            transfer_id="t5", sender_id="node-e", total_chunks=5,
+            data_schema_hash="abc", round_number=1,
+            sample_count=4, loss=0.1, accuracy=0.9,
+        )
+        buf.created_at = time.time() - EARLY_NACK_AGE_THRESHOLD - 1
+        buf.chunks = {0: b"x", 1: b"x", 3: b"x"}  # missing 2, 4
+        community._chunk_buffers[(mid, "t5")] = buf
+
+        await community._nack_incomplete_buffers()
+        await community._nack_incomplete_buffers()
+
+        community.ez_send.assert_called_once()

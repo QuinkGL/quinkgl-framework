@@ -166,7 +166,9 @@ class LearningNode:
             logger.warning("Node is not active")
             return
 
-        await self.aggregator.stop()
+        result = self.aggregator.stop()
+        if hasattr(result, "__await__"):
+            await result
         logger.debug(f"Node {self.peer_id} left the network")
 
     async def run_continuous(
@@ -208,7 +210,9 @@ class LearningNode:
 
     async def stop(self):
         """Stop the gossip learning loop and await graceful shutdown."""
-        await self.aggregator.stop()
+        result = self.aggregator.stop()
+        if hasattr(result, "__await__"):
+            await result
 
     def register_hook(self, hook_name: str, callback: Callable):
         """

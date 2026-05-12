@@ -39,6 +39,13 @@ class CompressionConfig:
     # TASK-092: Downcast weights to half/bfloat16 before transmission.
     # Set to "float16", "bfloat16", or None (no downcast).
     weight_dtype: Optional[str] = None
+    # Legacy constructor aliases.
+    sparsity: Optional[float] = None
+    quantization_bits: Optional[int] = None
+
+    def __post_init__(self):
+        if self.quantization is None and self.quantization_bits is not None:
+            self.quantization = QuantizationConfig(bits=self.quantization_bits)
 
 
 def compress_weights(
@@ -171,7 +178,7 @@ def compress_decompress_roundtrip(
 
 def decompress_weights(
     data: bytes,
-    meta: Dict[str, Any],
+    meta: Optional[Dict[str, Any]] = None,
     base_weights: Optional[Any] = None,
 ) -> Any:
     """
@@ -187,6 +194,11 @@ def decompress_weights(
     Returns:
         Reconstructed weights.
     """
+    if meta is None and isinstance(data, tuple) and len(data) == 2:
+        data, meta = data
+    if meta is None:
+        meta = {"steps": []}
+
     # S9a: validate pipeline_version so corrupted or mismatched metadata is detected early.
     version = meta.get("pipeline_version")
     if version is not None and version != 1:

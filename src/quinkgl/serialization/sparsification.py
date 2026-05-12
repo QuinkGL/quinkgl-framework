@@ -10,7 +10,7 @@ References:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -18,12 +18,30 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(init=False)
 class SparsificationConfig:
     top_k_ratio: float = 0.01
     method: str = "top_k"
     min_sparsity: float = 0.0  # Minimum sparsity ratio (0-1)
     max_sparsity: float = 0.99  # Maximum sparsity ratio (0-1)
+    target_sparsity: Optional[float] = field(default=None, repr=False)
+
+    def __init__(
+        self,
+        top_k_ratio: float = 0.01,
+        method: str = "top_k",
+        min_sparsity: float = 0.0,
+        max_sparsity: float = 0.99,
+        target_sparsity: Optional[float] = None,
+    ):
+        if target_sparsity is not None:
+            top_k_ratio = 1.0 - target_sparsity
+        self.top_k_ratio = top_k_ratio
+        self.method = method
+        self.min_sparsity = min_sparsity
+        self.max_sparsity = max_sparsity
+        self.target_sparsity = target_sparsity
+        self.__post_init__()
 
     def __post_init__(self):
         """Validate configuration after initialization."""
