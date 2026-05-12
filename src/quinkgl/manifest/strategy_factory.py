@@ -24,6 +24,13 @@ from quinkgl.manifest.schema import SwarmManifest
 from quinkgl.topology.affinity import AffinityTopology
 from quinkgl.topology.base import TopologyStrategy
 from quinkgl.topology.cyclon import CyclonTopology
+from quinkgl.topology.graph import (
+    HybridAffinityReliability,
+    RandomRegular,
+    ReliabilityAware,
+    Ring,
+    SmallWorld,
+)
 from quinkgl.topology.random import RandomTopology
 
 T = TypeVar("T")
@@ -55,6 +62,18 @@ _TOPOLOGY_REGISTRY: Dict[str, Type[TopologyStrategy]] = {
     _norm("CyclonTopology"): CyclonTopology,
     _norm("Affinity"): AffinityTopology,
     _norm("AffinityTopology"): AffinityTopology,
+    _norm("Ring"): Ring,
+    _norm("RingTopology"): Ring,
+    _norm("RandomRegular"): RandomRegular,
+    _norm("RandomRegularTopology"): RandomRegular,
+    _norm("Expander"): RandomRegular,
+    _norm("ExpanderTopology"): RandomRegular,
+    _norm("SmallWorld"): SmallWorld,
+    _norm("SmallWorldTopology"): SmallWorld,
+    _norm("ReliabilityAware"): ReliabilityAware,
+    _norm("ReliabilityAwareTopology"): ReliabilityAware,
+    _norm("HybridAffinityReliability"): HybridAffinityReliability,
+    _norm("HybridAffinityReliabilityTopology"): HybridAffinityReliability,
 }
 
 

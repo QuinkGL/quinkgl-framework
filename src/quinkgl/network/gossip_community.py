@@ -17,7 +17,7 @@ import os
 import struct
 import tempfile
 import uuid
-from typing import Optional, Callable, List, Any, Dict
+from typing import Optional, Callable, List, Any, Dict, Iterable
 from dataclasses import dataclass, field
 
 from ipv8.community import Community
@@ -26,6 +26,7 @@ from ipv8.messaging.payload import Payload
 from ipv8.peer import Peer
 
 from quinkgl.network.model_serializer import serialize_model, deserialize_model
+from quinkgl.serialization import CompressionConfig, compress_weights, decompress_weights
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,27 @@ MAX_INCOMING_MESSAGE_SIZE = 150 * 1024 * 1024
 CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
 
 # B7: Inter-chunk send delay (seconds) — prevents UDP buffer overflow on receiver.
-# v3: Increased from 0.012 to 0.025 to handle aggregate ingress from multiple
-# simultaneous senders in a 5-peer swarm (4 senders × 40 KB/s ≈ 160 KB/s).
-CHUNK_SEND_INTERVAL = 0.025
+# v4: Increased from 0.025 to 0.05 after CIFAR-sized transfers dropped roughly
+# half their chunks under two-peer bidirectional load.
+CHUNK_SEND_INTERVAL = 0.05
 
-# Timeout for incomplete transfers (300 seconds - increased for Colab/slow networks)
-CHUNK_TRANSFER_TIMEOUT = 300
+# Timeout for incomplete transfers (seconds).
+CHUNK_TRANSFER_TIMEOUT = 900
+
+# ACK/window flow control for chunked transfers.
+CHUNK_ACK_INTERVAL = 0.25
+CHUNK_ACK_EVERY = 16
+CHUNK_WINDOW_INITIAL = 32
+CHUNK_WINDOW_MAX = 128
+CHUNK_ACK_TIMEOUT = 8.0
+CHUNK_MAX_SEND_ATTEMPTS = 8
+CHUNK_MAX_NACK_INDICES = 128
+CHUNK_WINDOW_POLL_INTERVAL = 0.02
+RECEIVER_NACK_REPORT_INTERVAL = 30.0
+
+# Sender-side retry cache must outlive receiver-side incomplete-transfer
+# buffers; otherwise late NACKs cannot be serviced.
+OUTGOING_TRANSFER_CACHE_TTL = CHUNK_TRANSFER_TIMEOUT * 2
 
 # B4: Chunk-buffer memory caps to prevent DoS
 MAX_CONCURRENT_TRANSFERS_PER_PEER = 8
@@ -52,14 +68,14 @@ MAX_BUFFERED_BYTES_PER_PEER = 200 * 1024 * 1024  # 200 MB
 MAX_CHUNKS_PER_TRANSFER = 300_000  # ~300 MB at 1 KB/chunk
 
 # B5: NACK rate-limiting
-NACK_MAX_RESENDS_PER_TRANSFER = 6
-NACK_BUCKET_INTERVAL = 5.0   # seconds — refill one token per interval
-NACK_BUCKET_MAX_TOKENS = 10  # max burst per peer
-NACK_TRANSFER_BUCKET_MAX_TOKENS = 6
-NACK_TRANSFER_BUCKET_INTERVAL = 5.0
+NACK_MAX_RESENDS_PER_TRANSFER = 20
+NACK_BUCKET_INTERVAL = 2.0   # seconds — refill one token per interval
+NACK_BUCKET_MAX_TOKENS = 40  # max burst per peer
+NACK_TRANSFER_BUCKET_MAX_TOKENS = 20
+NACK_TRANSFER_BUCKET_INTERVAL = 2.0
 
 # B6: Early NACK gap detection
-EARLY_NACK_AGE_THRESHOLD = 18.0  # seconds — allow most chunks to arrive naturally
+EARLY_NACK_AGE_THRESHOLD = 10.0  # seconds — allow most chunks to arrive naturally
 
 # B16 §4.8: Hard byte cap on fingerprint JSON in discovery announcements
 MAX_FINGERPRINT_BYTES = 8192  # 8 KB
@@ -153,6 +169,48 @@ def _chunk_verify(public_key, signature: bytes, sender_id: str,
         return public_key.verify(signature, msg)
     except Exception:
         return False
+
+
+def _chunk_index_ranges(indices: Iterable[int]) -> list[tuple[int, int]]:
+    """Return inclusive contiguous ranges for chunk indices."""
+    sorted_indices = sorted(set(indices))
+    if not sorted_indices:
+        return []
+
+    ranges = []
+    start = prev = sorted_indices[0]
+    for index in sorted_indices[1:]:
+        if index == prev + 1:
+            prev = index
+            continue
+        ranges.append((start, prev))
+        start = prev = index
+    ranges.append((start, prev))
+    return ranges
+
+
+def _pack_chunk_ranges(indices: Iterable[int]) -> bytes:
+    """Pack received chunk indices as inclusive uint32 start/end ranges."""
+    ranges = _chunk_index_ranges(indices)
+    if not ranges:
+        return b""
+    return b"".join(struct.pack("!II", start, end) for start, end in ranges)
+
+
+def _unpack_chunk_ranges(data: bytes, total_chunks: Optional[int] = None) -> set[int]:
+    """Unpack inclusive uint32 start/end ranges into chunk indices."""
+    if len(data) % 8 != 0:
+        raise ValueError("chunk range payload length must be a multiple of 8")
+
+    indices: set[int] = set()
+    for offset in range(0, len(data), 8):
+        start, end = struct.unpack("!II", data[offset:offset + 8])
+        if end < start:
+            raise ValueError("chunk range end before start")
+        if total_chunks is not None and end >= total_chunks:
+            raise ValueError("chunk range out of bounds")
+        indices.update(range(start, end + 1))
+    return indices
 
 
 def _emit_ipv8_payload_dropped(community, reason: str, *, sender_id: Optional[str] = None,
@@ -510,6 +568,59 @@ class RequestChunksPayload(Payload):
         )
 
 
+class ChunkAckPayload(Payload):
+    """
+    Receiver feedback for ACK/window chunked transfer.
+
+    ``sack_ranges`` contains inclusive chunk index ranges packed as
+    network-order uint32 start/end pairs.
+    """
+    msg_id = 10
+    format_list = ['varlenH', 'varlenH', 'varlenH', 'I', 'I', 'varlenI', 'varlenH']
+
+    def __init__(
+        self,
+        transfer_id: str,
+        sender_id: str,
+        data_schema_hash: str,
+        round_number: int,
+        total_chunks: int,
+        sack_ranges: bytes,
+        signature: bytes = b"",
+    ):
+        super().__init__()
+        self.transfer_id = transfer_id
+        self.sender_id = sender_id
+        self.data_schema_hash = data_schema_hash
+        self.round_number = round_number
+        self.total_chunks = total_chunks
+        self.sack_ranges = sack_ranges
+        self.signature = signature
+
+    def to_pack_list(self):
+        return [
+            ('varlenH', self.transfer_id.encode('utf-8')),
+            ('varlenH', self.sender_id.encode('utf-8')),
+            ('varlenH', self.data_schema_hash.encode('utf-8')),
+            ('I', self.round_number),
+            ('I', self.total_chunks),
+            ('varlenI', self.sack_ranges),
+            ('varlenH', self.signature),
+        ]
+
+    @classmethod
+    def from_unpack_list(cls, *args):
+        return cls(
+            args[0].decode('utf-8'),
+            args[1].decode('utf-8'),
+            args[2].decode('utf-8'),
+            args[3],
+            args[4],
+            args[5],
+            args[6] if len(args) > 6 else b"",
+        )
+
+
 class ShufflePayload(Payload):
     """
     Payload for Cyclon shuffle request.
@@ -584,6 +695,10 @@ class ChunkBuffer:
     accuracy: float
     timestamp: int = 0
     created_at: float = field(default_factory=time.time)
+    last_ack_at: float = field(default_factory=time.time)
+    chunks_since_ack: int = 0
+    last_nack_at: float = 0.0
+    last_nack_signature: bytes = b""
     chunks: Dict[int, bytes] = field(default_factory=dict)
     
     def add_chunk(self, chunk_index: int, chunk_data: bytes) -> bool:
@@ -592,6 +707,8 @@ class ChunkBuffer:
         
         Returns True if all chunks have been received.
         """
+        if chunk_index not in self.chunks:
+            self.chunks_since_ack += 1
         self.chunks[chunk_index] = chunk_data
         return len(self.chunks) == self.total_chunks
     
@@ -615,6 +732,39 @@ class ChunkBuffer:
         # Sort chunks by index and concatenate
         sorted_chunks = [self.chunks[i] for i in range(self.total_chunks)]
         return b''.join(sorted_chunks)
+
+
+@dataclass
+class OutgoingChunkTransfer:
+    """Sender-side state for ACK/window chunked transfer."""
+    transfer_id: str
+    target_node_id: str
+    recipient_mid: str
+    peer: Peer
+    weights_bytes: bytes
+    sample_count: int
+    round_number: int
+    loss: float
+    accuracy: float
+    timestamp: int
+    total_chunks: int
+    inflight_key: tuple[str, int, str]
+    next_index: int = 0
+    acked: set[int] = field(default_factory=set)
+    sent_at: Dict[int, float] = field(default_factory=dict)
+    attempts: Dict[int, int] = field(default_factory=dict)
+    completed: asyncio.Event = field(default_factory=asyncio.Event)
+    failed_reason: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    retry_count: int = 0
+    last_progress_log: float = 0.0
+
+    def in_flight_count(self, now: float) -> int:
+        return sum(
+            1
+            for index, sent in self.sent_at.items()
+            if index not in self.acked and now - sent < CHUNK_ACK_TIMEOUT
+        )
 
 
 class PeerInfo:
@@ -735,6 +885,7 @@ class GossipLearningCommunity(Community):
         # Cache for outgoing transfers to support retry (resending chunks)
         # transfer_id -> { 'weights_bytes': bytes, 'timestamp': float, ... }
         self._outgoing_transfers: Dict[str, Dict] = {}
+        self._active_outgoing_transfers: Dict[str, OutgoingChunkTransfer] = {}
 
         # B5: NACK rate-limiting state
         # transfer_id -> resend count
@@ -777,6 +928,7 @@ class GossipLearningCommunity(Community):
         self.add_message_handler(HeartbeatPayload, self.on_heartbeat)
         self.add_message_handler(ModelChunkPayload, self.on_model_chunk)
         self.add_message_handler(RequestChunksPayload, self.on_request_chunks)
+        self.add_message_handler(ChunkAckPayload, self.on_chunk_ack)
         self.add_message_handler(ShufflePayload, self.on_shuffle_request)
         self.add_message_handler(ShuffleResponsePayload, self.on_shuffle_response)
         self.add_message_handler(PrototypeExchangePayload, self.on_prototype_exchange)
@@ -1083,10 +1235,9 @@ class GossipLearningCommunity(Community):
     async def _cleanup_outgoing_cache(self):
         """Remove old outgoing transfers from cache."""
         current_time = time.time()
-        timeout = 600
         expired = [
             tid for tid, data in self._outgoing_transfers.items()
-            if current_time - data['timestamp'] > timeout
+            if current_time - data['timestamp'] > OUTGOING_TRANSFER_CACHE_TTL
         ]
         for tid in expired:
             del self._outgoing_transfers[tid]
@@ -1098,6 +1249,9 @@ class GossipLearningCommunity(Community):
         for inflight_key, tid in list(self._inflight_transfers.items()):
             if tid not in self._outgoing_transfers:
                 del self._inflight_transfers[inflight_key]
+        for tid in list(getattr(self, "_active_outgoing_transfers", {}).keys()):
+            if tid not in self._outgoing_transfers:
+                del self._active_outgoing_transfers[tid]
 
     async def _nack_incomplete_buffers(self):
         """Proactively NACK incomplete buffers older than threshold."""
@@ -1141,18 +1295,11 @@ class GossipLearningCommunity(Community):
             if target_peer is None:
                 continue
 
-            missing_bytes = struct.pack(f'{len(missing)}I', *missing)
-            req_payload = RequestChunksPayload(
-                transfer_id=transfer_id,
-                sender_id=self.node_id,
-                missing_indices_bytes=missing_bytes
-            )
-            logger.debug(
-                f"Early-NACK: requesting {len(missing)} missing chunks "
-                f"for {transfer_id[:8]}... (age={age:.1f}s)"
-            )
-            self.ez_send(target_peer, req_payload)
-            self.metrics['nacks_sent'] += 1
+            if self._send_missing_chunks_report(target_peer, buffer):
+                logger.debug(
+                    f"Early-NACK: requesting {min(len(missing), CHUNK_MAX_NACK_INDICES)} "
+                    f"missing chunks for {transfer_id[:8]}... (age={age:.1f}s)"
+                )
 
     @lazy_wrapper(DiscoveryAnnouncePayload)
     async def on_discovery_announce(self, peer: Peer, payload: DiscoveryAnnouncePayload):
@@ -1228,6 +1375,9 @@ class GossipLearningCommunity(Community):
 
             if self.on_peer_discovered_callback:
                 await self.on_peer_discovered_callback(peer_info)
+
+    # Backward compatibility alias for older tests
+    _dispatch_discovery_announce = on_discovery_announce.__wrapped__
 
     @lazy_wrapper(ModelUpdatePayload)
     async def on_model_update(self, peer: Peer, payload: ModelUpdatePayload):
@@ -1471,6 +1621,9 @@ class GossipLearningCommunity(Community):
                 model_version=payload.model_version,
             )
 
+    # Backward compatibility alias for older tests
+    _dispatch_checkpoint = on_checkpoint.__wrapped__
+
     def broadcast_checkpoint(self, sender_id: str, round_number: int,
                              loss: float, accuracy: float,
                              model_version: str = "1.0.0"):
@@ -1543,6 +1696,210 @@ class GossipLearningCommunity(Community):
             return True
         return False
 
+    def _send_model_chunk(
+        self,
+        peer: Peer,
+        transfer_id: str,
+        weights_bytes: bytes,
+        chunk_index: int,
+        total_chunks: int,
+        sample_count: int,
+        round_number: int,
+        loss: float,
+        accuracy: float,
+        timestamp: int,
+    ) -> None:
+        """Sign and send one model chunk."""
+        start = chunk_index * CHUNK_SIZE
+        end = min(start + CHUNK_SIZE, len(weights_bytes))
+        chunk_data = weights_bytes[start:end]
+
+        sig = _chunk_sign(
+            self.my_peer.key,
+            self.node_id,
+            round_number,
+            self.data_schema_hash,
+            chunk_index,
+            chunk_data,
+            sample_count=sample_count,
+            loss=loss,
+            accuracy=accuracy,
+            timestamp=timestamp,
+            total_chunks=total_chunks,
+        )
+
+        chunk_payload = ModelChunkPayload(
+            transfer_id=transfer_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            sender_id=self.node_id,
+            data_schema_hash=self.data_schema_hash,
+            round_number=round_number,
+            sample_count=sample_count,
+            loss=loss,
+            accuracy=accuracy,
+            timestamp=timestamp,
+            chunk_data=chunk_data,
+            signature=sig,
+        )
+        self.ez_send(peer, chunk_payload)
+
+    def _send_chunk_ack(self, peer: Peer, buffer: ChunkBuffer) -> None:
+        """Send a compact ACK describing received chunk ranges."""
+        self._send_chunk_ack_ranges(
+            peer,
+            buffer.transfer_id,
+            buffer.data_schema_hash,
+            buffer.round_number,
+            buffer.total_chunks,
+            buffer.chunks.keys(),
+        )
+        buffer.last_ack_at = time.time()
+        buffer.chunks_since_ack = 0
+
+    def _send_chunk_ack_ranges(
+        self,
+        peer: Peer,
+        transfer_id: str,
+        data_schema_hash: str,
+        round_number: int,
+        total_chunks: int,
+        indices: Iterable[int],
+    ) -> None:
+        """Send an ACK for explicit received chunk indices."""
+        sack_ranges = _pack_chunk_ranges(indices)
+        sig = _chunk_sign(
+            self.my_peer.key,
+            self.node_id,
+            round_number,
+            data_schema_hash,
+            0,
+            sack_ranges,
+            total_chunks=total_chunks,
+        )
+        ack_payload = ChunkAckPayload(
+            transfer_id=transfer_id,
+            sender_id=self.node_id,
+            data_schema_hash=data_schema_hash,
+            round_number=round_number,
+            total_chunks=total_chunks,
+            sack_ranges=sack_ranges,
+            signature=sig,
+        )
+        self.ez_send(peer, ack_payload)
+
+    def _maybe_send_chunk_ack(self, peer: Peer, buffer: ChunkBuffer, *, force: bool = False) -> None:
+        now = time.time()
+        if (
+            force
+            or buffer.chunks_since_ack >= CHUNK_ACK_EVERY
+            or now - buffer.last_ack_at >= CHUNK_ACK_INTERVAL
+        ):
+            self._send_chunk_ack(peer, buffer)
+
+    def _send_missing_chunks_report(
+        self,
+        peer: Peer,
+        buffer: ChunkBuffer,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Send a throttled NACK-style missing report for a receiver buffer."""
+        missing = [i for i in range(buffer.total_chunks) if i not in buffer.chunks]
+        if not missing:
+            return False
+
+        missing = missing[:CHUNK_MAX_NACK_INDICES]
+        signature = struct.pack(f'{len(missing)}I', *missing)
+        now = time.time()
+        if (
+            not force
+            and signature == buffer.last_nack_signature
+            and now - buffer.last_nack_at < RECEIVER_NACK_REPORT_INTERVAL
+        ):
+            self.metrics['nacks_ignored_budget'] += 1
+            return False
+
+        req_payload = RequestChunksPayload(
+            transfer_id=buffer.transfer_id,
+            sender_id=self.node_id,
+            missing_indices_bytes=signature,
+        )
+        self.ez_send(peer, req_payload)
+        buffer.last_nack_at = now
+        buffer.last_nack_signature = signature
+        self.metrics['nacks_sent'] += 1
+        return True
+
+    @lazy_wrapper(ChunkAckPayload)
+    async def on_chunk_ack(self, peer: Peer, payload: ChunkAckPayload):
+        """Handle receiver ACKs for windowed chunk transfer."""
+        transfer = getattr(self, "_active_outgoing_transfers", {}).get(payload.transfer_id)
+        peer_mid = peer.mid.hex() if isinstance(peer.mid, bytes) else str(peer.mid)
+
+        if transfer is None:
+            logger.debug(
+                f"Ignoring ACK for unknown/completed transfer {payload.transfer_id[:8]}..."
+            )
+            return
+
+        if peer_mid != transfer.recipient_mid:
+            logger.warning(
+                f"ACK rejected: peer {peer_mid[:16]}... is not the "
+                f"recipient of transfer {payload.transfer_id[:8]}..."
+            )
+            return
+
+        if payload.sender_id != transfer.target_node_id:
+            logger.warning(
+                f"ACK rejected: sender_id={payload.sender_id} does not match "
+                f"target {transfer.target_node_id}"
+            )
+            return
+
+        if payload.total_chunks != transfer.total_chunks:
+            logger.warning(
+                f"ACK rejected for {payload.transfer_id[:8]}...: total_chunks mismatch"
+            )
+            return
+
+        if payload.signature and not _chunk_verify(
+            peer.public_key,
+            payload.signature,
+            payload.sender_id,
+            payload.round_number,
+            payload.data_schema_hash,
+            0,
+            payload.sack_ranges,
+            total_chunks=payload.total_chunks,
+        ):
+            logger.warning(
+                f"ACK rejected for {payload.transfer_id[:8]}...: invalid signature"
+            )
+            return
+
+        try:
+            acked = _unpack_chunk_ranges(payload.sack_ranges, transfer.total_chunks)
+        except ValueError as exc:
+            logger.warning(
+                f"ACK rejected for {payload.transfer_id[:8]}...: {exc}"
+            )
+            return
+
+        before = len(transfer.acked)
+        transfer.acked.update(acked)
+        if len(transfer.acked) != before:
+            logger.debug(
+                f"Chunk ACK {payload.transfer_id[:8]}... "
+                f"{len(transfer.acked)}/{transfer.total_chunks}"
+            )
+
+        if len(transfer.acked) >= transfer.total_chunks:
+            transfer.completed.set()
+
+    # Backward compatibility alias for tests
+    _dispatch_chunk_ack = on_chunk_ack.__wrapped__
+
     @lazy_wrapper(RequestChunksPayload)
     async def on_request_chunks(self, peer: Peer, payload: RequestChunksPayload):
         """
@@ -1573,6 +1930,7 @@ class GossipLearningCommunity(Community):
             return
 
         transfer_data = self._outgoing_transfers[tid]
+        active_transfer = getattr(self, "_active_outgoing_transfers", {}).get(tid)
 
         # B5: Authorize — only the original recipient may NACK
         expected_mid = transfer_data.get("recipient_mid")
@@ -1591,38 +1949,39 @@ class GossipLearningCommunity(Community):
             )
             return
 
-        # B5: Per-transfer resend budget
         resend_count = self._nack_resend_counts.get(tid, 0)
-        if resend_count >= NACK_MAX_RESENDS_PER_TRANSFER:
-            logger.warning(
-                f"NACK rejected: resend budget exhausted for transfer {tid[:8]}... "
-                f"({resend_count}/{NACK_MAX_RESENDS_PER_TRANSFER})"
-            )
-            _emit_ipv8_payload_dropped(
-                self,
-                "nack resend budget exhausted",
-                sender_id=payload.sender_id,
-                peer_mid=peer_mid,
-                transport="nack",
-                transfer_id=tid,
-            )
-            return
+        if active_transfer is None:
+            # B5: Per-transfer resend budget
+            if resend_count >= NACK_MAX_RESENDS_PER_TRANSFER:
+                logger.warning(
+                    f"NACK rejected: resend budget exhausted for transfer {tid[:8]}... "
+                    f"({resend_count}/{NACK_MAX_RESENDS_PER_TRANSFER})"
+                )
+                _emit_ipv8_payload_dropped(
+                    self,
+                    "nack resend budget exhausted",
+                    sender_id=payload.sender_id,
+                    peer_mid=peer_mid,
+                    transport="nack",
+                    transfer_id=tid,
+                )
+                return
 
-        # B5: Per-peer token bucket
-        if not self._nack_try_consume(peer_mid):
-            logger.warning(
-                f"NACK rate-limited for peer {peer_mid[:16]}..."
-            )
-            _emit_ipv8_payload_dropped(
-                self,
-                "nack rate limited",
-                sender_id=payload.sender_id,
-                peer_mid=peer_mid,
-                security_event="security.nack_rate_limited",
-                transport="nack",
-                transfer_id=tid,
-            )
-            return
+            # B5: Per-peer token bucket
+            if not self._nack_try_consume(peer_mid):
+                logger.warning(
+                    f"NACK rate-limited for peer {peer_mid[:16]}..."
+                )
+                _emit_ipv8_payload_dropped(
+                    self,
+                    "nack rate limited",
+                    sender_id=payload.sender_id,
+                    peer_mid=peer_mid,
+                    security_event="security.nack_rate_limited",
+                    transport="nack",
+                    transfer_id=tid,
+                )
+                return
 
         # B5: Validate missing_indices_bytes length
         raw_len = len(payload.missing_indices_bytes)
@@ -1666,6 +2025,12 @@ class GossipLearningCommunity(Community):
                 f"Dropped {len(missing_indices) - len(valid_indices)} "
                 f"out-of-range indices from NACK for {tid[:8]}..."
             )
+        if len(valid_indices) > CHUNK_MAX_NACK_INDICES:
+            logger.debug(
+                f"Capping NACK resend for {tid[:8]}... from "
+                f"{len(valid_indices)} to {CHUNK_MAX_NACK_INDICES} chunks"
+            )
+            valid_indices = valid_indices[:CHUNK_MAX_NACK_INDICES]
 
         logger.debug(
             f"Resending {len(valid_indices)} missing chunks to {payload.sender_id} "
@@ -1677,39 +2042,33 @@ class GossipLearningCommunity(Community):
         round_num = transfer_data.get('round', 0)
         sample_cnt = transfer_data.get('samples', 0)
 
+        if active_transfer is not None:
+            marked = 0
+            for index in valid_indices:
+                if index in active_transfer.acked:
+                    continue
+                if index in active_transfer.sent_at:
+                    active_transfer.sent_at[index] = 0.0
+                    marked += 1
+            logger.debug(
+                f"Recorded active-transfer NACK report for {tid[:8]}... "
+                f"marked={marked}/{len(valid_indices)}"
+            )
+            return
+
         for i in valid_indices:
-            start = i * CHUNK_SIZE
-            end = min(start + CHUNK_SIZE, len(weights_bytes))
-            chunk_data = weights_bytes[start:end]
-
-            # B14: Sign resent chunks
-            sig = _chunk_sign(
-                self.my_peer.key,
-                self.node_id, round_num,
-                self.data_schema_hash, i, chunk_data,
-                sample_count=sample_cnt,
-                loss=loss_val,
-                accuracy=acc_val,
-                timestamp=int(transfer_data.get('timestamp', time.time())),
-                total_chunks=total_chunks,
+            self._send_model_chunk(
+                peer,
+                tid,
+                weights_bytes,
+                i,
+                total_chunks,
+                sample_cnt,
+                round_num,
+                loss_val,
+                acc_val,
+                int(transfer_data.get('timestamp', time.time())),
             )
-
-            chunk_payload = ModelChunkPayload(
-                transfer_id=tid,
-                chunk_index=i,
-                total_chunks=total_chunks,
-                sender_id=self.node_id,
-                data_schema_hash=self.data_schema_hash,
-                round_number=round_num,
-                sample_count=sample_cnt,
-                loss=loss_val,
-                accuracy=acc_val,
-                timestamp=int(transfer_data.get('timestamp', time.time())),
-                chunk_data=chunk_data,
-                signature=sig,
-            )
-
-            self.ez_send(peer, chunk_payload)
             await asyncio.sleep(0.002)
 
         # B5: Increment resend counter
@@ -1841,6 +2200,21 @@ class GossipLearningCommunity(Community):
                 f"Unsigned chunk {payload.chunk_index} of {transfer_id[:8]}... "
                 f"from {payload.sender_id} (no signature)"
             )
+
+        if (peer_mid, transfer_id) in self._completed_chunk_transfers:
+            logger.debug(
+                f"Duplicate completed transfer {transfer_id[:8]}... from "
+                f"{payload.sender_id}; sending completion ACK"
+            )
+            self._send_chunk_ack_ranges(
+                peer,
+                transfer_id,
+                payload.data_schema_hash,
+                payload.round_number,
+                payload.total_chunks,
+                range(payload.total_chunks),
+            )
+            return
 
         # v3: Semantic dedup — IPv8 signatures are non-deterministic, so NACK
         # resends appear as distinct packets. Drop duplicates silently here.
@@ -1998,6 +2372,7 @@ class GossipLearningCommunity(Community):
         
         # Add chunk to buffer
         is_complete = buffer.add_chunk(payload.chunk_index, payload.chunk_data)
+        self._maybe_send_chunk_ack(peer, buffer, force=is_complete)
         
         # Update peer last seen
         if payload.sender_id in self.known_peers:
@@ -2119,26 +2494,173 @@ class GossipLearningCommunity(Community):
                     f"(first 10): {missing[:10]} (total={len(missing)})"
                 )
 
-                # Send NACK (RequestChunksPayload)
-                import struct
-                # Pack indices as unsigned ints
-                missing_bytes = struct.pack(f'{len(missing)}I', *missing)
-
-                req_payload = RequestChunksPayload(
-                    transfer_id=transfer_id,
-                    sender_id=self.node_id,
-                    missing_indices_bytes=missing_bytes
-                )
-
-                # Send request
-                logger.debug(
-                    f"Requesting {len(missing)} missing chunks for {transfer_id[:8]}..."
-                )
-                self.ez_send(peer, req_payload)
-                self.metrics['nacks_sent'] += 1
+                if self._send_missing_chunks_report(peer, buffer):
+                    logger.debug(
+                        f"Requesting {min(len(missing), CHUNK_MAX_NACK_INDICES)} "
+                        f"missing chunks for {transfer_id[:8]}..."
+                    )
 
     # Backward compatibility alias for older tests
     _dispatch_model_chunk = on_model_chunk.__wrapped__
+
+    async def _send_chunked_model_update(
+        self,
+        target_node_id: str,
+        peer_info: PeerInfo,
+        weights_bytes: bytes,
+        sample_count: int,
+        round_number: int,
+        loss: float,
+        accuracy: float,
+    ) -> bool:
+        model_hash = hashlib.sha256(weights_bytes).hexdigest()[:16]
+        inflight_key = (target_node_id, round_number, model_hash)
+        existing_tid = self._inflight_transfers.get(inflight_key)
+        if existing_tid is not None and existing_tid in self._outgoing_transfers:
+            logger.info(
+                f"Skipping duplicate send to {target_node_id}: "
+                f"transfer {existing_tid[:8]}... already in-flight for round {round_number}"
+            )
+            return True
+
+        transfer_id = str(uuid.uuid4())
+        self._inflight_transfers[inflight_key] = transfer_id
+        total_chunks = (len(weights_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        timestamp = int(time.time())
+        recipient_mid = (
+            peer_info.peer.mid.hex()
+            if isinstance(peer_info.peer.mid, bytes)
+            else str(peer_info.peer.mid)
+        )
+
+        logger.info(
+            f"Chunk transfer started transfer={transfer_id[:8]}... "
+            f"target={target_node_id} chunks={total_chunks} "
+            f"window={min(CHUNK_WINDOW_INITIAL, CHUNK_WINDOW_MAX, total_chunks)}"
+        )
+        logger.debug(
+            f"Chunked transfer target: {target_node_id} @ {peer_info.peer.address}"
+        )
+
+        self._outgoing_transfers[transfer_id] = {
+            'weights': weights_bytes,
+            'loss': loss,
+            'accuracy': accuracy,
+            'round': round_number,
+            'samples': sample_count,
+            'timestamp': timestamp,
+            'recipient_mid': recipient_mid,
+        }
+        transfer = OutgoingChunkTransfer(
+            transfer_id=transfer_id,
+            target_node_id=target_node_id,
+            recipient_mid=recipient_mid,
+            peer=peer_info.peer,
+            weights_bytes=weights_bytes,
+            sample_count=sample_count,
+            round_number=round_number,
+            loss=loss,
+            accuracy=accuracy,
+            timestamp=timestamp,
+            total_chunks=total_chunks,
+            inflight_key=inflight_key,
+        )
+        self._active_outgoing_transfers[transfer_id] = transfer
+
+        window_size = min(CHUNK_WINDOW_INITIAL, CHUNK_WINDOW_MAX, total_chunks)
+        try:
+            while not transfer.completed.is_set():
+                now = time.time()
+                if now - transfer.created_at > CHUNK_TRANSFER_TIMEOUT:
+                    transfer.failed_reason = "timeout"
+                    self.metrics['chunk_transfers_failed_timeout'] += 1
+                    break
+
+                # Retry timed-out chunks before filling the window with new data.
+                for index, sent_at in list(transfer.sent_at.items()):
+                    if index in transfer.acked:
+                        continue
+                    if now - sent_at < CHUNK_ACK_TIMEOUT:
+                        continue
+                    attempts = transfer.attempts.get(index, 0)
+                    if attempts >= CHUNK_MAX_SEND_ATTEMPTS:
+                        transfer.failed_reason = f"max attempts exceeded chunk={index}"
+                        break
+                    self._send_model_chunk(
+                        transfer.peer,
+                        transfer.transfer_id,
+                        transfer.weights_bytes,
+                        index,
+                        transfer.total_chunks,
+                        transfer.sample_count,
+                        transfer.round_number,
+                        transfer.loss,
+                        transfer.accuracy,
+                        transfer.timestamp,
+                    )
+                    transfer.sent_at[index] = time.time()
+                    transfer.attempts[index] = attempts + 1
+                    transfer.retry_count += 1
+                    self.metrics['chunks_resent'] += 1
+                    await asyncio.sleep(CHUNK_SEND_INTERVAL)
+
+                if transfer.failed_reason:
+                    break
+
+                while (
+                    transfer.next_index < transfer.total_chunks
+                    and transfer.in_flight_count(time.time()) < window_size
+                ):
+                    index = transfer.next_index
+                    self._send_model_chunk(
+                        transfer.peer,
+                        transfer.transfer_id,
+                        transfer.weights_bytes,
+                        index,
+                        transfer.total_chunks,
+                        transfer.sample_count,
+                        transfer.round_number,
+                        transfer.loss,
+                        transfer.accuracy,
+                        transfer.timestamp,
+                    )
+                    transfer.sent_at[index] = time.time()
+                    transfer.attempts[index] = transfer.attempts.get(index, 0) + 1
+                    transfer.next_index += 1
+                    if index < transfer.total_chunks - 1:
+                        await asyncio.sleep(CHUNK_SEND_INTERVAL)
+
+                if len(transfer.acked) >= transfer.total_chunks:
+                    transfer.completed.set()
+                    break
+
+                if time.time() - transfer.last_progress_log >= 10.0:
+                    logger.info(
+                        f"Chunk transfer progress transfer={transfer_id[:8]}... "
+                        f"acked={len(transfer.acked)}/{transfer.total_chunks} "
+                        f"retries={transfer.retry_count}"
+                    )
+                    transfer.last_progress_log = time.time()
+
+                await asyncio.sleep(CHUNK_WINDOW_POLL_INTERVAL)
+
+            if transfer.completed.is_set():
+                logger.info(
+                    f"Chunk transfer completed transfer={transfer_id[:8]}... "
+                    f"chunks={transfer.total_chunks} retries={transfer.retry_count} "
+                    f"duration={time.time() - transfer.created_at:.1f}s"
+                )
+                return True
+
+            logger.warning(
+                f"Chunk transfer failed transfer={transfer_id[:8]}... "
+                f"reason={transfer.failed_reason or 'unknown'} "
+                f"acked={len(transfer.acked)}/{transfer.total_chunks}"
+            )
+            return False
+        finally:
+            self._active_outgoing_transfers.pop(transfer_id, None)
+            self._inflight_transfers.pop(inflight_key, None)
 
     async def send_model_update(
         self,
@@ -2209,94 +2731,15 @@ class GossipLearningCommunity(Community):
                 self.ez_send(peer_info.peer, payload)
                 logger.debug(f"Sent model update to {target_node_id} ({len(weights_bytes)} bytes)")
             else:
-                # Large payload - use chunked transfer
-                # v3: Sender-side idempotency — same (peer, round, model) gets same transfer_id
-                model_hash = hashlib.sha256(weights_bytes).hexdigest()[:16]
-                inflight_key = (target_node_id, round_number, model_hash)
-                existing_tid = self._inflight_transfers.get(inflight_key)
-                if existing_tid is not None and existing_tid in self._outgoing_transfers:
-                    logger.info(
-                        f"Skipping duplicate send to {target_node_id}: "
-                        f"transfer {existing_tid[:8]}... already in-flight for round {round_number}"
-                    )
-                    return True
-
-                transfer_id = str(uuid.uuid4())
-                self._inflight_transfers[inflight_key] = transfer_id
-                total_chunks = (len(weights_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                timestamp = int(time.time())
-                
-                # Debug: show target peer address
-                logger.debug(
-                    f"Chunked transfer target: {target_node_id} @ {peer_info.peer.address}"
+                return await self._send_chunked_model_update(
+                    target_node_id,
+                    peer_info,
+                    weights_bytes,
+                    sample_count,
+                    round_number,
+                    loss_val,
+                    acc_val,
                 )
-                
-                logger.debug(
-                    f"Sending chunked model to {target_node_id} "
-                    f"(transfer={transfer_id[:8]}..., size={len(weights_bytes)} bytes, chunks={total_chunks})"
-                )
-                
-                # Cache transfer for retry (B5: include recipient_mid for NACK auth)
-                recipient_mid = peer_info.peer.mid.hex() if isinstance(peer_info.peer.mid, bytes) else str(peer_info.peer.mid)
-                self._outgoing_transfers[transfer_id] = {
-                    'weights': weights_bytes,
-                    'loss': loss_val,
-                    'accuracy': acc_val,
-                    'round': round_number,
-                    'samples': sample_count,
-                    'timestamp': timestamp,
-                    'recipient_mid': recipient_mid,
-                }
-                
-                for i in range(total_chunks):
-                    start = i * CHUNK_SIZE
-                    end = min(start + CHUNK_SIZE, len(weights_bytes))
-                    chunk_data = weights_bytes[start:end]
-                    
-                    # B14: Sign each chunk
-                    sig = _chunk_sign(
-                        self.my_peer.key,
-                        self.node_id, round_number,
-                        self.data_schema_hash, i, chunk_data,
-                        sample_count=sample_count,
-                        loss=loss_val,
-                        accuracy=acc_val,
-                        timestamp=timestamp,
-                        total_chunks=total_chunks,
-                    )
- 
-                    chunk_payload = ModelChunkPayload(
-                        transfer_id=transfer_id,
-                        chunk_index=i,
-                        total_chunks=total_chunks,
-                        sender_id=self.node_id,
-                        data_schema_hash=self.data_schema_hash,
-                        round_number=round_number,
-                        sample_count=sample_count,
-                        loss=loss_val,
-                        accuracy=acc_val,
-                        timestamp=timestamp,
-                        chunk_data=chunk_data,
-                        signature=sig,
-                    )
-                    
-                    self.ez_send(peer_info.peer, chunk_payload)
-                    
-                    # Progress logging every 50 chunks (with 10KB chunks, we have ~230 chunks)
-                    if (i + 1) % 50 == 0 or i == total_chunks - 1:
-                        progress = (i + 1) / total_chunks * 100
-                        logger.debug(
-                            f"Chunk send progress to {target_node_id}: "
-                            f"{i + 1}/{total_chunks} ({progress:.0f}%)"
-                        )
-                    
-                    # B7: Single inter-chunk delay (was two separate sleeps)
-                    if i < total_chunks - 1:
-                        await asyncio.sleep(CHUNK_SEND_INTERVAL)
-                
-                logger.debug(f"Sent {total_chunks} chunks to {target_node_id}")
-                # v3: Remove from inflight tracking once all chunks are dispatched
-                self._inflight_transfers.pop(inflight_key, None)
             
             return True
 
@@ -2304,7 +2747,7 @@ class GossipLearningCommunity(Community):
             logger.error(f"Failed to send model update: {e}")
             return False
 
-    def broadcast_model_update(
+    async def broadcast_model_update(
         self,
         weights: Any,
         sample_count: int,
@@ -2328,7 +2771,14 @@ class GossipLearningCommunity(Community):
         sent_count = 0
 
         for node_id in self.known_peers:
-            if self.send_model_update(node_id, weights, sample_count, round_number, loss, accuracy):
+            if await self.send_model_update(
+                node_id,
+                weights,
+                sample_count,
+                round_number,
+                loss,
+                accuracy,
+            ):
                 sent_count += 1
 
         logger.debug(f"Broadcast model update to {sent_count} peers")

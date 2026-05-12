@@ -10,6 +10,10 @@
 4. **Aggregation** — received updates are combined using the swarm's aggregation strategy
 5. **Repeat** — the process continues for the configured number of rounds
 
+By default each peer sends to 3 compatible peers per round. When a swarm grows
+beyond 100 compatible peers, QuinkGL increases fanout gradually: 5 targets up
+to 250 peers, 7 targets up to 500 peers, and 10 targets above 500 peers.
+
 ## Advantages Over Centralized FL
 
 | Aspect | Centralized FL | Gossip Learning |

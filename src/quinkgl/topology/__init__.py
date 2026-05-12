@@ -30,6 +30,13 @@ from quinkgl.topology.base import TopologyStrategy, SelectionContext, PeerInfo
 from quinkgl.topology.random import RandomTopology
 from quinkgl.topology.cyclon import CyclonTopology
 from quinkgl.topology.affinity import AffinityTopology
+from quinkgl.topology.graph import (
+    HybridAffinityReliability,
+    RandomRegular,
+    ReliabilityAware,
+    Ring,
+    SmallWorld,
+)
 from quinkgl.topology.spectral import (
     SpectralAnalyzer,
     SpectralReport,
@@ -59,6 +66,11 @@ __all__ = [
     "RandomTopology",
     "CyclonTopology",
     "AffinityTopology",
+    "Ring",
+    "RandomRegular",
+    "SmallWorld",
+    "ReliabilityAware",
+    "HybridAffinityReliability",
     # Spectral analysis
     "SpectralAnalyzer",
     "SpectralReport",

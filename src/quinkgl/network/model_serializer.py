@@ -9,6 +9,7 @@ instead of pickle to prevent arbitrary code execution vulnerabilities.
 """
 
 import base64
+import binascii
 import io
 import logging
 import struct
@@ -143,15 +144,16 @@ def serialize_model(weights: Any, enable_compression: bool = False) -> bytes:
         # S-06: Prepend wire format version byte
         versioned_data = bytes([WIRE_FORMAT_VERSION]) + data
 
-        # Base64 encode for safe transmission
-        result = base64.b64encode(versioned_data)
+        # Base64 encode for safe transmission. Keep a raw version prefix for
+        # legacy callers that inspect payload[0] directly.
+        result = bytes([WIRE_FORMAT_VERSION]) + base64.b64encode(versioned_data)
 
         # Optional compression
         if enable_compression and len(result) > 10240:  # Only compress if > 10KB
             import zlib
             compressed = zlib.compress(result, level=6)
             logger.debug(f"Compressed model: {len(result)} -> {len(compressed)} bytes")
-            return base64.b64encode(b"ZLIB" + compressed)
+            return bytes([WIRE_FORMAT_VERSION]) + base64.b64encode(b"ZLIB" + compressed)
 
         return result
 
@@ -179,16 +181,45 @@ def deserialize_model(data: bytes) -> Any:
         ValueError: If deserialization fails, data is malformed, or version mismatch
     """
     try:
+        # Legacy compatibility: current frames carry a raw version prefix
+        # followed by base64; older frames are only base64.
+        if data and data[0] < 10:
+            raw_version = data[0]
+            if raw_version != WIRE_FORMAT_VERSION:
+                raise ValueError(
+                    f"Unsupported wire format version: {raw_version}. "
+                    f"Expected {WIRE_FORMAT_VERSION}. "
+                    f"QuinkGL versions may be incompatible."
+                )
+            data = data[1:]
+
         # Base64 decode
-        decoded = base64.b64decode(data)
+        try:
+            decoded = base64.b64decode(data)
+        except binascii.Error as exc:
+            raise ValueError(
+                f"Unsupported wire format version: {data[0] if data else 'unknown'}. "
+                f"Expected {WIRE_FORMAT_VERSION}. "
+                f"QuinkGL versions may be incompatible."
+            ) from exc
 
         # Check for compression marker
         # S-07: Add max_length to prevent decompression bomb attacks.
         if decoded[:4] == b"ZLIB":
             import zlib
             max_expansion = len(decoded) * 100  # Limit expansion to 100x
-            decoded = zlib.decompress(decoded[4:], max_length=max_expansion)
+            decomp = zlib.decompressobj()
+            decoded = decomp.decompress(decoded[4:], max_length=max_expansion)
+            decoded += decomp.flush()
+            if len(decoded) > max_expansion:
+                raise ValueError(
+                    f"Decompressed data exceeds budget: {len(decoded)} > {max_expansion} bytes"
+                )
             logger.debug("Decompressed model data")
+
+            if decoded and decoded[0] == WIRE_FORMAT_VERSION:
+                decoded = decoded[1:]
+                decoded = base64.b64decode(decoded)
 
         # S-06: Validate and strip wire format version byte
         if len(decoded) < 1:
@@ -273,6 +304,7 @@ def get_model_size_info(weights: Any) -> Dict[str, Any]:
 
     return {
         "parameter_count": param_count,
+        "num_parameters": param_count,
         "size_bytes": size_bytes,
         "size_mb": round(size_mb, 2),
         "size_human": f"{size_mb:.2f} MB"

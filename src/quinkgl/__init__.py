@@ -115,6 +115,13 @@ from quinkgl.topology.base import (
 from quinkgl.topology.random import RandomTopology
 from quinkgl.topology.cyclon import CyclonTopology
 from quinkgl.topology.affinity import AffinityTopology
+from quinkgl.topology.graph import (
+    HybridAffinityReliability,
+    RandomRegular,
+    ReliabilityAware,
+    Ring,
+    SmallWorld,
+)
 from quinkgl.topology.spectral import (
     SpectralAnalyzer,
     SpectralReport,
@@ -220,6 +227,11 @@ __all__ = [
     "RandomTopology",
     "CyclonTopology",
     "AffinityTopology",
+    "Ring",
+    "RandomRegular",
+    "SmallWorld",
+    "ReliabilityAware",
+    "HybridAffinityReliability",
     "SpectralAnalyzer",
     "SpectralReport",
     "build_ring_adjacency",

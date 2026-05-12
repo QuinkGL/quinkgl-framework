@@ -62,6 +62,7 @@ def _make_receiver():
     # Bind real methods (bypass @lazy_wrapper to avoid serializer dependencies)
     c._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(c)
     c._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(c)
+    c._send_missing_chunks_report = GossipLearningCommunity._send_missing_chunks_report.__get__(c)
     c.on_model_chunk = GossipLearningCommunity.on_model_chunk.__wrapped__.__get__(c, GossipLearningCommunity)
     c.on_request_chunks = GossipLearningCommunity.on_request_chunks.__wrapped__.__get__(c, GossipLearningCommunity)
     c._nack_incomplete_buffers = GossipLearningCommunity._nack_incomplete_buffers.__get__(c)
@@ -217,3 +218,37 @@ class TestChunkedTransferNACKRecovery:
         # creating a new one.
         assert result is True
         assert len(sender._outgoing_transfers) == 1
+
+
+@pytest.mark.asyncio
+async def test_broadcast_model_update_awaits_each_send():
+    community = object.__new__(GossipLearningCommunity)
+    community.known_peers = {"peer-a": object(), "peer-b": object()}
+    sent_to = []
+
+    async def send_model_update(
+        node_id,
+        weights,
+        sample_count,
+        round_number,
+        loss,
+        accuracy,
+    ):
+        sent_to.append(
+            (node_id, weights, sample_count, round_number, loss, accuracy)
+        )
+        return node_id == "peer-a"
+
+    community.send_model_update = send_model_update
+
+    sent_count = await GossipLearningCommunity.broadcast_model_update(
+        community,
+        {"w": [1.0]},
+        8,
+        5,
+        0.1,
+        0.9,
+    )
+
+    assert sent_count == 1
+    assert [entry[0] for entry in sent_to] == ["peer-a", "peer-b"]

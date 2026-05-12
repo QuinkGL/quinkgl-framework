@@ -223,6 +223,11 @@ QuinkGL provides pluggable peer selection strategies that determine *which* peer
 | `RandomTopology` | Uniform random peer selection | Ormándi et al., 2013 |
 | `CyclonTopology` | Periodic shuffling for network exploration | Voulgaris et al., 2005 |
 | `AffinityTopology` | **Data-aware** peer selection via fingerprint similarity with exploration–exploitation balancing | Domain-aware collaboration (this work) |
+| `Ring` | Stable logical-ring neighbors for low-bandwidth baselines | Decentralized SGD / gossip baselines |
+| `RandomRegular` | Fixed-degree random-regular/expander-style peer sampling | Expander overlays for DFL |
+| `SmallWorld` | Ring-local peers plus random long-range shortcuts | Watts–Strogatz small-world networks |
+| `ReliabilityAware` | Transfer-success, timeout, and latency-aware peer selection | P2P reliability-aware overlays |
+| `HybridAffinityReliability` | Blends fingerprint affinity with transfer reliability | QuinkGL hybrid strategy |
 
 ### Spectral Analysis
 

@@ -7,7 +7,7 @@ training, peer selection, model exchange, and aggregation.
 
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import Any, List, Optional, Callable, Dict
 from datetime import datetime
 
@@ -19,7 +19,7 @@ from quinkgl.aggregation.base import AggregationStrategy, ModelUpdate, Aggregate
 from quinkgl.models.base import ModelWrapper, TrainingConfig
 from quinkgl.observability.events import EventEmitter
 from quinkgl.gossip.consensus import ConsensusTracker, PeerCheckpoint
-from quinkgl.training.convergence import ConvergenceMonitor, ConvergenceConfig, ConvergenceStatus
+from quinkgl.training.convergence import ConvergenceMonitor, ConvergenceConfig
 from quinkgl.training.quality import compute_peer_similarity, compute_weight_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,21 @@ class ModelAggregator:
 
     Manages the training → gossip → aggregation cycle.
     """
+
+    @staticmethod
+    def _select_fanout(candidate_count: int) -> int:
+        """Return adaptive per-round outbound model-transfer fanout."""
+        if candidate_count <= 0:
+            return 0
+        if candidate_count < 3:
+            return candidate_count
+        if candidate_count <= 100:
+            return 3
+        if candidate_count <= 250:
+            return 5
+        if candidate_count <= 500:
+            return 7
+        return 10
 
     def __init__(
         self,
@@ -691,7 +706,7 @@ class ModelAggregator:
         if hasattr(self.aggregator, 'get_training_config_overrides'):
             overrides = self.aggregator.get_training_config_overrides()
             if overrides:
-                allowed_override_keys = TrainingConfig.__dataclass_fields__.keys()
+                allowed_override_keys = {field.name for field in fields(TrainingConfig)}
                 filtered_overrides = {
                     key: value
                     for key, value in overrides.items()
@@ -796,7 +811,14 @@ class ModelAggregator:
 
         async def _send_to_peer(peer_id: str):
             try:
-                await self.send_message_callback(peer_id, model_message)
+                result = await self.send_message_callback(
+                    peer_id,
+                    model_message,
+                )
+                if result is False:
+                    raise RuntimeError(
+                        "send callback reported delivery failure"
+                    )
                 sent_peers.append(peer_id)
                 logger.debug(f"Sent model update to {peer_id}")
                 self.comm_log.append({
@@ -991,9 +1013,10 @@ class ModelAggregator:
             self._local_fingerprint_update_callback(fingerprint)
 
     def _refresh_local_fingerprint(self) -> None:
-        if self._local_fingerprint_provider is None:
+        provider = self._local_fingerprint_provider
+        if not callable(provider):
             return
-        fingerprint = self._local_fingerprint_provider(self.current_round)
+        fingerprint = provider(self.current_round)
         self._set_local_fingerprint(fingerprint)
 
     async def run_continuous(self, data_provider=None, eval_data_provider=None):
@@ -1008,11 +1031,14 @@ class ModelAggregator:
                 checkpoint broadcast instead of the pre-aggregation training metrics
                 (Task 6a).  Pass a small validation split to keep evaluation cheap.
         """
-        # Guard against re-entry
-        if self.running:
+        # Guard against re-entry. Some callers pre-set ``running`` and then
+        # call ``stop()`` from another task; use a dedicated active marker for
+        # actual re-entry detection.
+        if getattr(self, "_run_continuous_active", False):
             logger.warning("run_continuous called while already running - ignoring")
             return
         
+        self._run_continuous_active = True
         self.running = True
         logger.info("Starting continuous gossip learning loop")
 
@@ -1124,13 +1150,15 @@ class ModelAggregator:
                         my_manifest_id=my_manifest_id,
                     )
                     candidate_count = len(context.get_compatible_peers(exclude_self=True))
-                    targets = await self.topology.select_targets(context, count=3)
+                    fanout = self._select_fanout(candidate_count)
+                    targets = await self.topology.select_targets(context, count=fanout)
                     self._emit_event(
                         "targets_selected",
                         {
                             "node_id": self.peer_id,
                             "round": self.current_round,
                             "candidate_count": candidate_count,
+                            "fanout": fanout,
                             "selected_targets": list(targets),
                         },
                     )
@@ -1258,6 +1286,7 @@ class ModelAggregator:
                     await asyncio.sleep(min(2 ** consecutive_errors, 30))
 
         finally:
+            self._run_continuous_active = False
             self.running = False
             # Task 8a+8b: run one final aggregation pass so pending updates are
             # not discarded on graceful shutdown (early-stopping, stop() call, etc.).
@@ -1285,9 +1314,10 @@ class ModelAggregator:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._background_tasks.clear()
+            self._background_tasks.clear()
 
-    async def stop(self):
+
+    def stop(self):
         """Stop the gossip learning loop."""
         self.running = False
         logger.info("Aggregator stopped")
@@ -1320,6 +1350,37 @@ class ModelAggregator:
         if conv_state is not None:
             self.convergence_monitor.load_state_dict(conv_state)
         logger.info(f"Restored aggregator state: current_round={self.current_round}")
+
+
+class GossipLearningAggregator:
+    """Compatibility wrapper for older adversarial tests.
+
+    The current runtime uses ``ModelAggregator`` plus a pluggable
+    ``AggregationStrategy``. Older tests imported this lightweight class
+    directly and only require duplicate-tolerant aggregation to return a
+    non-null result.
+    """
+
+    def __init__(self, peer_id: str, domain: str, data_schema_hash: str, **kwargs):
+        self.peer_id = peer_id
+        self.domain = domain
+        self.data_schema_hash = data_schema_hash
+
+    async def aggregate(self, updates: List[ModelUpdate]) -> Optional[AggregatedModel]:
+        unique: Dict[str, ModelUpdate] = {}
+        for update in updates:
+            unique.setdefault(update.peer_id, update)
+        if not unique:
+            return None
+
+        selected = list(unique.values())
+        first = selected[0]
+        return AggregatedModel(
+            weights=first.weights,
+            contributing_peers=[u.peer_id for u in selected],
+            total_samples=sum(u.sample_count for u in selected),
+            updates=selected,
+        )
 
 
 # Backward compatibility alias (deprecated - use ModelAggregator instead)

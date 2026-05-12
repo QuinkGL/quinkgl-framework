@@ -318,6 +318,27 @@ def test_store_broadcasts_normalized_event_payloads():
     assert event_broadcast["payload"]["related_node_id"] == "node-b"
 
 
+def test_targets_selected_preserves_fanout_metadata():
+    store = TelemetryStore(session_id="session-1")
+
+    store.ingest_event(
+        "targets_selected",
+        {
+            "node_id": "node-a",
+            "round": 3,
+            "candidate_count": 251,
+            "fanout": 7,
+            "selected_targets": ["node-b"],
+            "ignored": "filtered",
+        },
+    )
+
+    [event] = store.get_node_events("node-a")
+    assert event["payload"]["candidate_count"] == 251
+    assert event["payload"]["fanout"] == 7
+    assert "ignored" not in event["payload"]
+
+
 def test_store_accumulates_unique_received_peers_per_round():
     store = TelemetryStore(session_id="session-1")
     store.ingest_heartbeat({"node_id": "node-a", "domain": "demo", "running": True})

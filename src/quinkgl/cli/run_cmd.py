@@ -81,7 +81,7 @@ def build_parser(sub: _SubParsersAction) -> None:
         help="Do not send telemetry (overrides URL default and env).",
     )
     parser.add_argument("--telemetry-secret", default=None)
-    parser.add_argument("--telemetry-heartbeat-interval", type=float, default=5.0)
+    parser.add_argument("--telemetry-heartbeat-interval", type=float, default=60.0)
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Verify manifest and exit")

@@ -45,6 +45,23 @@ def test_run_help_does_not_offer_telemetry_url(capsys):
     assert "--telemetry-url" not in captured.out
 
 
+def test_run_telemetry_heartbeat_interval_defaults_to_60_seconds():
+    from quinkgl.cli.__main__ import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--manifest",
+            "swarm.qgl",
+            "--script",
+            "peer.py",
+        ]
+    )
+
+    assert args.telemetry_heartbeat_interval == 60.0
+
+
 def test_maybe_print_dashboard_code_uses_manifest_qglkey(tmp_path, monkeypatch, capsys):
     manifest = SwarmManifest(
         name="run-dashboard-code",

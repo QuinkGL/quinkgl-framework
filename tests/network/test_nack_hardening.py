@@ -14,10 +14,13 @@ from unittest.mock import MagicMock
 
 from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
+    OutgoingChunkTransfer,
     RequestChunksPayload,
     NACK_MAX_RESENDS_PER_TRANSFER,
     NACK_BUCKET_MAX_TOKENS,
     CHUNK_SIZE,
+    CHUNK_TRANSFER_TIMEOUT,
+    OUTGOING_TRANSFER_CACHE_TTL,
 )
 
 
@@ -30,6 +33,7 @@ def _make_peer(mid_hex: str):
 def _make_community():
     community = MagicMock(spec=GossipLearningCommunity)
     community._outgoing_transfers = {}
+    community._active_outgoing_transfers = {}
     community._nack_resend_counts = {}
     community._nack_buckets = {}
     community._nack_transfer_buckets = {}
@@ -42,6 +46,7 @@ def _make_community():
     # Bind the real methods
     community._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(community)
     community._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(community)
+    community._send_model_chunk = GossipLearningCommunity._send_model_chunk.__get__(community)
     community.metrics = {
         'chunk_transfers_started': 0,
         'chunk_transfers_completed': 0,
@@ -140,6 +145,40 @@ class TestResendBudget:
         )
         community.ez_send.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_active_transfer_nack_does_not_use_legacy_resend_budget(self):
+        """Active ACK/window transfers treat NACK as a missing report."""
+        community = _make_community()
+        mid = "ca" * 20
+        tid = "t-active"
+        _seed_transfer(community, tid, weights_len=CHUNK_SIZE * 5, recipient_mid=mid)
+        peer = _make_peer(mid)
+        transfer = OutgoingChunkTransfer(
+            transfer_id=tid,
+            target_node_id="node-active",
+            recipient_mid=mid,
+            peer=peer,
+            weights_bytes=community._outgoing_transfers[tid]["weights"],
+            sample_count=8,
+            round_number=1,
+            loss=0.0,
+            accuracy=0.0,
+            timestamp=int(time.time()),
+            total_chunks=5,
+            inflight_key=("node-active", 1, "hash"),
+        )
+        transfer.sent_at[2] = time.time()
+        community._active_outgoing_transfers[tid] = transfer
+        community._nack_resend_counts[tid] = NACK_MAX_RESENDS_PER_TRANSFER
+
+        payload = _nack_payload(tid, "node-active", [2])
+        await GossipLearningCommunity._dispatch_request_chunks(community, peer, payload)
+
+        community.ez_send.assert_not_called()
+        assert community._nack_resend_counts[tid] == NACK_MAX_RESENDS_PER_TRANSFER
+        assert transfer.sent_at[2] == 0.0
+        assert community.event_emitter.emit.call_args_list == []
+
 
 class TestTokenBucketRateLimit:
     @pytest.mark.asyncio
@@ -192,6 +231,24 @@ class TestMalformedPayload:
         )
 
         community.ez_send.assert_not_called()
+
+
+class TestOutgoingTransferCache:
+    @pytest.mark.asyncio
+    async def test_retry_cache_outlives_receiver_transfer_timeout(self):
+        community = _make_community()
+        _seed_transfer(community, "t-cache")
+        community._outgoing_transfers["t-cache"]["timestamp"] = (
+            time.time() - CHUNK_TRANSFER_TIMEOUT - 1
+        )
+
+        community._cleanup_outgoing_cache = (
+            GossipLearningCommunity._cleanup_outgoing_cache.__get__(community)
+        )
+        await community._cleanup_outgoing_cache()
+
+        assert OUTGOING_TRANSFER_CACHE_TTL > CHUNK_TRANSFER_TIMEOUT
+        assert "t-cache" in community._outgoing_transfers
 
     @pytest.mark.asyncio
     async def test_empty_payload_rejected(self):

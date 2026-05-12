@@ -2,14 +2,22 @@
 
 QuinkGL implements rate limits to prevent denial-of-service attacks.
 
-## Manifest Exchange
+## Model Chunk Transfer
 
 | Limit | Value | Behavior |
 |---|---|---|
-| Max requests per peer per minute | 4 | Excess → `NACK(RATE_LIMITED)` |
-| Request timeout | 30 seconds | → `ERR_WIRE_TIMEOUT` |
-| Max chunk size | 1200 bytes | UDP headroom |
-| Max total chunks | Unbounded | `ERR_WIRE_CHUNK_INCONSISTENT` on mismatch |
+| Per-round model fanout | 3 targets up to 100 compatible peers; 5 up to 250; 7 up to 500; 10 above 500 | Caps concurrent outbound model transfers per peer |
+| Chunk payload size | 1024 bytes | Keeps UDP datagrams below typical MTU ceilings |
+| Transfer timeout | 900 seconds | Incomplete transfer is abandoned |
+| Max chunks per transfer | 300,000 | Oversized transfer rejected |
+| Initial ACK window | 32 chunks | Sender limits in-flight chunks |
+| Max ACK window | 128 chunks | Upper bound for future window growth |
+| ACK timeout | 8 seconds | Unacked sent chunks become retry candidates |
+| Max send attempts per chunk | 8 | Transfer fails after repeated missed ACKs |
+| Receiver NACK report interval | 30 seconds | Repeated identical missing-chunk reports are suppressed |
+| Legacy NACK resend budget | 20 reports per transfer | Applies to inactive cached transfers only |
+| NACK peer bucket | 40 tokens, refill 1 token / 2s | Applies to legacy NACK resends |
+| NACK transfer bucket | 20 tokens, refill 1 token / 2s | Applies to legacy NACK resends |
 
 ## Directory Community
 
@@ -35,7 +43,8 @@ QuinkGL implements rate limits to prevent denial-of-service attacks.
 
 | Limit | Reasoning |
 |---|---|
-| Manifest: 4 req/min | Prevents amplification; legitimate peers rarely need more |
+| Chunk window | Prevents UDP burst loss while keeping large model transfers moving |
+| NACK throttling | Prevents repeated missing-chunk reports from becoming log or resend spam |
 | Directory: 100 ads/day | Prevents spam; legitimate creators publish infrequently |
 | Telemetry: 120 req/min | Balances observability vs. server load |
 | Max request: 64 KiB | Prevents memory exhaustion from oversized payloads |

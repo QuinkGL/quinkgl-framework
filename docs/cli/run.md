@@ -31,7 +31,7 @@ and enters the gossip-learning loop.  It supports three modes:
 | `--trusted-pubkey` | — | Ed25519 hex pubkey for `pinned` policy (repeatable) |
 | `--rounds` | manifest limit or `1000` | Training round count |
 | `--telemetry-secret` | `QUINKGL_TELEMETRY_SECRET` env | Auth secret for telemetry ingest |
-| `--telemetry-heartbeat-interval` | `5.0` | Seconds between heartbeats |
+| `--telemetry-heartbeat-interval` | `60.0` | Seconds between heartbeats |
 | `--no-telemetry` | false | Disable dashboard telemetry for this peer |
 | `--checkpoint-dir` | — | Directory for periodic model checkpoints |
 | `--resume` | false | Load latest checkpoint before training |

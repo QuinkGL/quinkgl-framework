@@ -35,10 +35,10 @@ The `.qgl` file is shareable and contains only secret-free telemetry metadata.
 The `.qglkey` file is private, should be distributed out-of-band, and should
 not be committed to source control.
 
-Change the heartbeat interval (default 5.0 s):
+Change the heartbeat interval (default 60.0 s):
 
 ```bash
-quinkgl run ... --telemetry-heartbeat-interval 10.0
+quinkgl run ... --telemetry-heartbeat-interval 30.0
 ```
 
 ## What the Dashboard Provides

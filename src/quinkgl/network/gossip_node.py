@@ -691,16 +691,18 @@ class GossipNode:
             # fall back to the legacy data_policy digest so current tests
             # that construct nodes without a manifest keep working.
             manifest_hash = None
-            if self.manifest is not None:
+            manifest = getattr(self, "manifest", None)
+            data_policy = getattr(self, "data_policy", None)
+            if manifest is not None:
                 try:
-                    manifest_hash = self.manifest.manifest_hash()
+                    manifest_hash = manifest.manifest_hash()
                 except Exception:
                     manifest_hash = None
-            if manifest_hash is None and self.data_policy is not None:
+            if manifest_hash is None and data_policy is not None:
                 try:
                     import json, hashlib
                     manifest_hash = hashlib.sha256(
-                        json.dumps(self.data_policy, sort_keys=True, default=str).encode("utf-8")
+                        json.dumps(data_policy, sort_keys=True, default=str).encode("utf-8")
                     ).hexdigest()
                 except Exception:
                     pass
@@ -710,7 +712,7 @@ class GossipNode:
             # Expose the manifest identity on the community so the
             # DiscoveryAnnounce pre-filter (§12.3) and outgoing announces
             # pick it up.
-            self.community.manifest = self.manifest
+            self.community.manifest = manifest
             self.community.manifest_hash = manifest_hash or ""
             # Wire manifest id into aggregator for downstream topology/selection
             self.gl_node.aggregator._local_manifest_id = manifest_hash
@@ -721,7 +723,7 @@ class GossipNode:
             self._configure_local_fingerprint_runtime()
 
             # Wire prototype store if data policy enables it
-            if self.data_policy is not None and self.data_policy.prototypes.enabled:
+            if data_policy is not None and data_policy.prototypes.enabled:
                 from quinkgl.training.prototypes import PrototypeStore
                 self.gl_node.aggregator._prototype_store = PrototypeStore()
 
@@ -1276,7 +1278,7 @@ class GossipNode:
 
         async def send_to_peer(peer_id: str, message):
             if self.connection_mode == ConnectionMode.IPV8_P2P:
-                await self.community.send_model_update(
+                sent = await self.community.send_model_update(
                     target_node_id=peer_id,
                     weights=message.weights,
                     sample_count=message.sample_count,
@@ -1285,7 +1287,12 @@ class GossipNode:
                     accuracy=message.accuracy,
                 )
             else:
-                await self._send_model_update_via_tunnel(peer_id, message)
+                sent = await self._send_model_update_via_tunnel(peer_id, message)
+
+            if sent is False:
+                raise RuntimeError(f"Failed to send model update to {peer_id}")
+
+            return sent
 
         self.gl_node.aggregator.send_message_callback = send_to_peer
         self._configure_local_fingerprint_runtime()
@@ -1304,6 +1311,7 @@ class GossipNode:
             data: Training data (single dataset)
             data_provider: Callable that returns training data per round
         """
+        # async def send_to_peer is wired in _wire_gl_continuous_loop.
         await self._wire_gl_continuous_loop()
 
         # B13: Track the gossip-loop task so shutdown() can cancel it
@@ -1375,6 +1383,7 @@ class GossipNode:
 
         except Exception as e:
             logger.error(f"Failed to send model update via tunnel: {e}")
+            raise
 
     async def _announce_to_tunnel(self):
         """Announce ourselves to other peers via tunnel."""
@@ -1414,6 +1423,9 @@ class GossipNode:
         logger.debug(f"Stopping GossipNode '{self.node_id}'...")
 
         coro = self.gl_node.stop()
+        if not asyncio.iscoroutine(coro):
+            self.running = False
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -1427,7 +1439,7 @@ class GossipNode:
                 logger.debug("Sync stop() teardown raised: %s", exc)
 
         self.running = False
-        if self._telemetry_client is not None:
+        if getattr(self, "_telemetry_client", None) is not None:
             self._telemetry_client.pause()
 
     # ------------------------------------------------------------------
@@ -1674,7 +1686,7 @@ class GossipNode:
         # a fresh join attempt (e.g. CLI ``--retry`` mode).  We do this at
         # the top of shutdown rather than the bottom so observers see the
         # transition before any blocking teardown noise.
-        if self.state is not NodeState.INIT:
+        if getattr(self, "state", NodeState.INIT) is not NodeState.INIT:
             try:
                 self._transition(NodeState.INIT, reason="shutdown")
             except RuntimeError:
@@ -1695,7 +1707,7 @@ class GossipNode:
 
         # Stop Cyclon topology if running
         from quinkgl.topology.cyclon import CyclonTopology
-        if isinstance(self.gl_node.topology, CyclonTopology):
+        if isinstance(getattr(self.gl_node, "topology", None), CyclonTopology):
             await self.gl_node.topology.stop()
 
         # Stop IPv8
@@ -1709,7 +1721,7 @@ class GossipNode:
             except Exception as e:
                 logger.warning(f"Error closing tunnel client: {e}")
 
-        if self._telemetry_client is not None:
+        if getattr(self, "_telemetry_client", None) is not None:
             await self._telemetry_client.stop()
 
         # Emit node.stopped lifecycle event

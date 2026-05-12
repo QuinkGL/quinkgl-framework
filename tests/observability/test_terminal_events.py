@@ -642,6 +642,51 @@ async def test_run_continuous_emits_targets_selected():
     assert targets_selected["selected_targets"] == ["peer-a"]
 
 
+@pytest.mark.asyncio
+async def test_run_continuous_uses_adaptive_fanout_for_large_swarms():
+    seen = []
+    selected_counts = []
+
+    emitter = EventEmitter()
+    emitter.subscribe(lambda event: seen.append((event.event_type, dict(event.payload))))
+
+    topology = DummyTopology(targets=[])
+    aggregator = ModelAggregator(
+        peer_id="n1",
+        domain="demo",
+        data_schema_hash="abc",
+        model=DummyModel(),
+        topology=topology,
+        aggregator=DummyAggregator(),
+        gossip_interval=0.0,
+        training_config=TrainingConfig(),
+    )
+    aggregator.event_emitter = emitter
+
+    for index in range(251):
+        peer_id = f"peer-{index}"
+        aggregator.known_peers[peer_id] = PeerInfo(
+            peer_id=peer_id,
+            domain="demo",
+            data_schema_hash="abc",
+            model_version="1.0.0",
+        )
+
+    def on_select(context, count):
+        selected_counts.append(count)
+        aggregator.running = False
+
+    topology.on_select = on_select
+    aggregator.running = True
+
+    await aggregator.run_continuous(data_provider=None)
+
+    assert selected_counts == [7]
+    targets_selected = next(payload for event_type, payload in seen if event_type == "targets_selected")
+    assert targets_selected["candidate_count"] == 251
+    assert targets_selected["fanout"] == 7
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle event formatting tests
 # ---------------------------------------------------------------------------

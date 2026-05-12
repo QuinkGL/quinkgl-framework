@@ -108,7 +108,7 @@ The client:
 2. Serialises and `POST`s them to `/api/telemetry/events`.
 3. Starts a background heartbeat loop that polls `node.get_stats()` and
    `POST`s the snapshot to `/api/telemetry/heartbeats` every
-   `--telemetry-heartbeat-interval` seconds (default 5.0).
+   `--telemetry-heartbeat-interval` seconds (default 60.0).
 4. Retries failed deliveries with exponential backoff (up to 3 attempts).
 5. Emits `telemetry.disconnected` / `telemetry.delivery_failed` events
    locally so the terminal UI reflects connectivity issues.
