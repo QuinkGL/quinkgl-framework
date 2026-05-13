@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quinkgl"
-version = "0.3.5"
+version = "0.3.6"
 description = "A decentralized gossip learning framework for P2P edge intelligence"
 readme = "README.md"
 authors = [
