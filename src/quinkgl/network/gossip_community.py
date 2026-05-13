@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 MAX_INCOMING_MESSAGE_SIZE = 150 * 1024 * 1024
 
 # Chunk size for large model transfers
-# UDP Safe Payload size is ~1400 bytes (MTU 1500 - Headers).
-# Using 1024 bytes to be safe and avoid IP fragmentation which causes high packet loss.
-CHUNK_SIZE = 1024  # 1KB chunks - safe for MTU
+# UDP-safe payload size must leave room for IPv8, signatures, and encryption
+# overhead. 1024-byte model chunks fragmented on WAN links in practice.
+CHUNK_SIZE = 768  # Keep IPv8/encryption overhead below common WAN MTUs.
 
 # B7: Inter-chunk send delay (seconds) — prevents UDP buffer overflow on receiver.
 # v4: Increased from 0.025 to 0.05 after CIFAR-sized transfers dropped roughly
@@ -49,9 +49,9 @@ CHUNK_TRANSFER_TIMEOUT = 900
 # ACK/window flow control for chunked transfers.
 CHUNK_ACK_INTERVAL = 0.25
 CHUNK_ACK_EVERY = 16
-CHUNK_WINDOW_INITIAL = 32
+CHUNK_WINDOW_INITIAL = 16
 CHUNK_WINDOW_MAX = 128
-CHUNK_ACK_TIMEOUT = 8.0
+CHUNK_ACK_TIMEOUT = 12.0
 CHUNK_MAX_SEND_ATTEMPTS = 8
 CHUNK_MAX_NACK_INDICES = 128
 CHUNK_WINDOW_POLL_INTERVAL = 0.02
@@ -68,7 +68,6 @@ MAX_BUFFERED_BYTES_PER_PEER = 200 * 1024 * 1024  # 200 MB
 MAX_CHUNKS_PER_TRANSFER = 300_000  # ~300 MB at 1 KB/chunk
 
 # B5: NACK rate-limiting
-NACK_MAX_RESENDS_PER_TRANSFER = 20
 NACK_BUCKET_INTERVAL = 2.0   # seconds — refill one token per interval
 NACK_BUCKET_MAX_TOKENS = 40  # max burst per peer
 NACK_TRANSFER_BUCKET_MAX_TOKENS = 20
@@ -1951,23 +1950,23 @@ class GossipLearningCommunity(Community):
 
         resend_count = self._nack_resend_counts.get(tid, 0)
         if active_transfer is None:
-            # B5: Per-transfer resend budget
-            if resend_count >= NACK_MAX_RESENDS_PER_TRANSFER:
+            # B5: Rate-limit cached transfer resends without permanently
+            # refusing late receiver recovery.
+            if not self._nack_try_consume_transfer(tid):
                 logger.warning(
-                    f"NACK rejected: resend budget exhausted for transfer {tid[:8]}... "
-                    f"({resend_count}/{NACK_MAX_RESENDS_PER_TRANSFER})"
+                    f"NACK rate-limited for transfer {tid[:8]}..."
                 )
                 _emit_ipv8_payload_dropped(
                     self,
-                    "nack resend budget exhausted",
+                    "nack transfer rate limited",
                     sender_id=payload.sender_id,
                     peer_mid=peer_mid,
+                    security_event="security.nack_rate_limited",
                     transport="nack",
                     transfer_id=tid,
                 )
                 return
 
-            # B5: Per-peer token bucket
             if not self._nack_try_consume(peer_mid):
                 logger.warning(
                     f"NACK rate-limited for peer {peer_mid[:16]}..."
@@ -2049,6 +2048,7 @@ class GossipLearningCommunity(Community):
                     continue
                 if index in active_transfer.sent_at:
                     active_transfer.sent_at[index] = 0.0
+                    active_transfer.attempts[index] = 0
                     marked += 1
             logger.debug(
                 f"Recorded active-transfer NACK report for {tid[:8]}... "
@@ -2222,6 +2222,9 @@ class GossipLearningCommunity(Community):
         # not confused (B3: buffer is already keyed by peer_mid + transfer_id).
         chunk_key = (peer_mid, transfer_id, payload.chunk_index)
         if chunk_key in self._recent_chunks:
+            buffer = self._chunk_buffers.get(buf_key)
+            if buffer is not None and payload.chunk_index in buffer.chunks:
+                self._maybe_send_chunk_ack(peer, buffer, force=True)
             return
         self._recent_chunks[chunk_key] = time.time()
 

@@ -7,17 +7,16 @@ QuinkGL implements rate limits to prevent denial-of-service attacks.
 | Limit | Value | Behavior |
 |---|---|---|
 | Per-round model fanout | 3 targets up to 100 compatible peers; 5 up to 250; 7 up to 500; 10 above 500 | Caps concurrent outbound model transfers per peer |
-| Chunk payload size | 1024 bytes | Keeps UDP datagrams below typical MTU ceilings |
+| Chunk payload size | 768 bytes | Leaves room for IPv8/signature overhead below typical WAN MTU ceilings |
 | Transfer timeout | 900 seconds | Incomplete transfer is abandoned |
 | Max chunks per transfer | 300,000 | Oversized transfer rejected |
-| Initial ACK window | 32 chunks | Sender limits in-flight chunks |
+| Initial ACK window | 16 chunks | Sender limits in-flight chunks |
 | Max ACK window | 128 chunks | Upper bound for future window growth |
-| ACK timeout | 8 seconds | Unacked sent chunks become retry candidates |
+| ACK timeout | 12 seconds | Unacked sent chunks become retry candidates |
 | Max send attempts per chunk | 8 | Transfer fails after repeated missed ACKs |
 | Receiver NACK report interval | 30 seconds | Repeated identical missing-chunk reports are suppressed |
-| Legacy NACK resend budget | 20 reports per transfer | Applies to inactive cached transfers only |
 | NACK peer bucket | 40 tokens, refill 1 token / 2s | Applies to legacy NACK resends |
-| NACK transfer bucket | 20 tokens, refill 1 token / 2s | Applies to legacy NACK resends |
+| NACK transfer bucket | 20 tokens, refill 1 token / 2s | Throttles cached transfer recovery without permanently refusing late NACKs |
 
 ## Directory Community
 
