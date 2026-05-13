@@ -16,6 +16,7 @@ from quinkgl.network.gossip_community import (
     ModelChunkPayload,
     RequestChunksPayload,
     ChunkBuffer,
+    ChunkAckPayload,
     CHUNK_SIZE,
 )
 from quinkgl.network.model_serializer import serialize_model
@@ -62,6 +63,11 @@ def _make_receiver():
     # Bind real methods (bypass @lazy_wrapper to avoid serializer dependencies)
     c._nack_try_consume = GossipLearningCommunity._nack_try_consume.__get__(c)
     c._nack_try_consume_transfer = GossipLearningCommunity._nack_try_consume_transfer.__get__(c)
+    c.my_peer = MagicMock()
+    c.my_peer.key.signature = MagicMock(return_value=b"\x00" * 64)
+    c._send_chunk_ack_ranges = GossipLearningCommunity._send_chunk_ack_ranges.__get__(c)
+    c._send_chunk_ack = GossipLearningCommunity._send_chunk_ack.__get__(c)
+    c._maybe_send_chunk_ack = GossipLearningCommunity._maybe_send_chunk_ack.__get__(c)
     c._send_missing_chunks_report = GossipLearningCommunity._send_missing_chunks_report.__get__(c)
     c.on_model_chunk = GossipLearningCommunity.on_model_chunk.__wrapped__.__get__(c, GossipLearningCommunity)
     c.on_request_chunks = GossipLearningCommunity.on_request_chunks.__wrapped__.__get__(c, GossipLearningCommunity)
@@ -87,6 +93,23 @@ def _chunk_payload(transfer_id, sender_id, round_number, chunk_index,
 
 
 class TestChunkedTransferNACKRecovery:
+    def test_duplicate_chunk_resends_ack_for_existing_buffer(self):
+        """Duplicate chunks should refresh sender ACK state, not disappear."""
+        receiver = _make_receiver()
+        sender_peer = _make_peer("aa" * 20)
+        transfer_id = "t-duplicate-ack"
+        payload = _chunk_payload(transfer_id, "sender", 1, 0, 3, b"chunk-0")
+
+        receiver.on_model_chunk(sender_peer, payload)
+        receiver.ez_send.reset_mock()
+
+        receiver.on_model_chunk(sender_peer, payload)
+
+        receiver.ez_send.assert_called_once()
+        ack_payload = receiver.ez_send.call_args[0][1]
+        assert isinstance(ack_payload, ChunkAckPayload)
+        assert ack_payload.transfer_id == transfer_id
+
     @pytest.mark.asyncio
     async def test_nack_recover_missing_chunks_and_fire_callback(self):
         """Drop 3 of 10 chunks; NACK should recover them and invoke callback."""

@@ -14,11 +14,13 @@ from unittest.mock import MagicMock
 from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
     ChunkBuffer,
+    CHUNK_ACK_TIMEOUT,
+    CHUNK_SIZE,
     CHUNK_TRANSFER_TIMEOUT,
+    CHUNK_WINDOW_INITIAL,
     EARLY_NACK_AGE_THRESHOLD,
     NACK_BUCKET_INTERVAL,
     NACK_BUCKET_MAX_TOKENS,
-    NACK_MAX_RESENDS_PER_TRANSFER,
     NACK_TRANSFER_BUCKET_INTERVAL,
     NACK_TRANSFER_BUCKET_MAX_TOKENS,
     RECEIVER_NACK_REPORT_INTERVAL,
@@ -66,8 +68,10 @@ def _add_peer(community, node_id, mid_hex):
 
 
 def test_large_model_transfer_reliability_tuning_constants():
+    assert CHUNK_SIZE == 768
+    assert CHUNK_WINDOW_INITIAL == 16
+    assert CHUNK_ACK_TIMEOUT == 12.0
     assert CHUNK_TRANSFER_TIMEOUT == 900
-    assert NACK_MAX_RESENDS_PER_TRANSFER == 20
     assert NACK_BUCKET_MAX_TOKENS == 40
     assert NACK_BUCKET_INTERVAL == 2.0
     assert NACK_TRANSFER_BUCKET_MAX_TOKENS == 20

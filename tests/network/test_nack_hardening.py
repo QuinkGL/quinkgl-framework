@@ -16,8 +16,8 @@ from quinkgl.network.gossip_community import (
     GossipLearningCommunity,
     OutgoingChunkTransfer,
     RequestChunksPayload,
-    NACK_MAX_RESENDS_PER_TRANSFER,
     NACK_BUCKET_MAX_TOKENS,
+    NACK_TRANSFER_BUCKET_MAX_TOKENS,
     CHUNK_SIZE,
     CHUNK_TRANSFER_TIMEOUT,
     OUTGOING_TRANSFER_CACHE_TTL,
@@ -121,29 +121,30 @@ class TestNACKAuthorization:
 
 class TestResendBudget:
     @pytest.mark.asyncio
-    async def test_budget_exhaustion(self):
-        """After NACK_MAX_RESENDS_PER_TRANSFER resends, further NACKs are refused."""
+    async def test_cached_transfer_nacks_are_rate_limited_not_permanently_refused(self):
+        """Cached transfer recovery is throttled by token bucket, not hard budget."""
         community = _make_community()
         mid = "cc" * 20
         _seed_transfer(community, "t2", weights_len=CHUNK_SIZE * 5, recipient_mid=mid)
         peer = _make_peer(mid)
 
-        for i in range(NACK_MAX_RESENDS_PER_TRANSFER):
+        for i in range(NACK_TRANSFER_BUCKET_MAX_TOKENS):
             payload = _nack_payload("t2", "node-c", [0])
             await GossipLearningCommunity._dispatch_request_chunks(
                 community, peer, payload
             )
 
-        # All budget used
-        assert community._nack_resend_counts["t2"] == NACK_MAX_RESENDS_PER_TRANSFER
+        assert community._nack_resend_counts["t2"] == NACK_TRANSFER_BUCKET_MAX_TOKENS
 
-        # Next NACK should be refused
+        # Next immediate NACK should be token-bucket limited, not hard-budget rejected.
         community.ez_send.reset_mock()
         payload = _nack_payload("t2", "node-c", [0])
         await GossipLearningCommunity._dispatch_request_chunks(
             community, peer, payload
         )
         community.ez_send.assert_not_called()
+        emitted = [call.args[0] for call in community.event_emitter.emit.call_args_list]
+        assert emitted[-2:] == ["security.nack_rate_limited", "ipv8_payload_dropped"]
 
     @pytest.mark.asyncio
     async def test_active_transfer_nack_does_not_use_legacy_resend_budget(self):
@@ -168,15 +169,17 @@ class TestResendBudget:
             inflight_key=("node-active", 1, "hash"),
         )
         transfer.sent_at[2] = time.time()
+        transfer.attempts[2] = 7
         community._active_outgoing_transfers[tid] = transfer
-        community._nack_resend_counts[tid] = NACK_MAX_RESENDS_PER_TRANSFER
+        community._nack_resend_counts[tid] = NACK_TRANSFER_BUCKET_MAX_TOKENS
 
         payload = _nack_payload(tid, "node-active", [2])
         await GossipLearningCommunity._dispatch_request_chunks(community, peer, payload)
 
         community.ez_send.assert_not_called()
-        assert community._nack_resend_counts[tid] == NACK_MAX_RESENDS_PER_TRANSFER
+        assert community._nack_resend_counts[tid] == NACK_TRANSFER_BUCKET_MAX_TOKENS
         assert transfer.sent_at[2] == 0.0
+        assert transfer.attempts[2] == 0
         assert community.event_emitter.emit.call_args_list == []
 
 
